@@ -650,6 +650,12 @@ $(OBJ)/.vkd3d-proton-post-build64:
 	touch $@
 
 
+##
+## LatencyFleX2
+##
+$(OBJ)/.vkd3d-proton-post-build64:
+	mkdir -p "$(DST_DIR)"/lib64/wine/lfx2
+	cp $(SRCDIR)/lfx2-bin/latencyflex2_rust.dll "$(DST_DIR)"/lib64/wine/lfx2
 
 ##
 ## mediaconv
