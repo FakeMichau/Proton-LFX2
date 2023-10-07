@@ -1408,6 +1408,7 @@ class Session:
         self.check_environment("PROTON_HEAP_DELAY_FREE", "heapdelayfree")
         self.check_environment("PROTON_ENABLE_NVAPI", "enablenvapi")
         self.check_environment("PROTON_ENABLE_AMD_AGS", "enableamdags")
+        self.check_environment("LFX2", "forcelfx2")
 
         if "noesync" in self.compat_config:
             self.env.pop("WINEESYNC", "")
@@ -1535,6 +1536,13 @@ class Session:
             else:
                 s = dll + "=" + setting
         append_to_env_str(self.env, "WINEDLLOVERRIDES", s, ";")
+
+        #enable lfx2
+        if "forcelfx2" in self.compat_config:
+            self.env["DXVK_ENABLE_NVAPI"] = "1"
+            self.env["DXVK_NVAPI_DRIVER_VERSION"] = "53713"
+            self.env["DXVK_NVAPI_ALLOW_OTHER_DRIVERS"] = "1"
+            self.env["DXVK_CONFIG"] = "dxgi.customVendorId = 10de;dxgi.hideAmdGpu = True;dxgi.hideNvidiaGpu = False;dxgi.customDeviceId = 2684;dxgi.customDeviceDesc = \"NVIDIA GeForce RTX 4090\""
 
     def dump_dbg_env(self, f):
         f.write("PATH=\"" + self.env["PATH"] + "\" \\\n")
