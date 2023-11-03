@@ -956,6 +956,8 @@ class CompatData:
 
                 try_copy(g_proton.lib64_dir + "wine/lfx2/latencyflex2_rust.dll", "drive_c/windows/system32",
                         prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                try_copy(g_proton.lib_dir + "wine/lfx2/latencyflex2_rust.dll", "drive_c/windows/syswow64",
+                        prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
 
                 # If the user requested the NVAPI be available, copy it into place.
                 # If they didn't, clean up any stray nvapi DLLs.
