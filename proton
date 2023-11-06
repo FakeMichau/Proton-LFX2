@@ -414,6 +414,7 @@ class Proton:
         self.bin_dir = self.path("files/bin/")
         self.lib_dir = self.path("files/lib/")
         self.lib64_dir = self.path("files/lib64/")
+        self.upscalers_dir = self.path("files/upscalers/")
         self.fonts_dir = self.path("files/share/fonts/")
         self.wine_fonts_dir = self.path("files/share/wine/fonts/")
         self.wine_inf = self.path("files/share/wine/wine.inf")
@@ -800,6 +801,8 @@ class CompatData:
             # collect configuration info
             steamdir = os.environ["STEAM_COMPAT_CLIENT_INSTALL_PATH"]
 
+            use_upscaler = "PROTON_UPSCALER" in os.environ and nonzero(os.environ["PROTON_UPSCALER"])
+
             use_wined3d = "wined3d" in g_session.compat_config
             use_dxvk_dxgi = not use_wined3d and \
                     not ("WINEDLLOVERRIDES" in g_session.env and "dxgi=b" in g_session.env["WINEDLLOVERRIDES"])
@@ -840,6 +843,7 @@ class CompatData:
                 g_proton.fonts_dir,
                 g_proton.lib_dir,
                 g_proton.lib64_dir,
+                g_proton.upscalers_dir,
                 steamdir,
                 getmtimestr(steamdir, 'legacycompat', 'steamclient.dll'),
                 getmtimestr(steamdir, 'legacycompat', 'steamclient64.dll'),
@@ -850,6 +854,7 @@ class CompatData:
                 str(use_dxvk_dxgi),
                 builtin_dll_copy,
                 str(use_nvapi),
+                str(use_upscaler),
             ))
 
             # check whether any prefix config has changed
@@ -984,10 +989,35 @@ class CompatData:
                 # Try to detect known DLLs that ship with the NVIDIA Linux Driver
                 # and add them into the prefix
                 nvidia_wine_dll_dir = find_nvidia_wine_dll_dir()
-                if nvidia_wine_dll_dir:
+                if nvidia_wine_dll_dir and not use_upscaler:
                     for dll in ["_nvngx.dll", "nvngx.dll"]:
                         try_copy(nvidia_wine_dll_dir + "/" + dll, "drive_c/windows/system32", optional=True,
                                  prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+
+                if use_upscaler:
+                    # very hacky way to do that
+                    # but that way there's no need to call wine early
+                    # it's needed so that nvngx.dll is loaded
+                    with open(os.path.join(self.prefix_dir, "system.reg"), 'rt+') as system_reg:
+                        count = 0
+                        for line in system_reg:
+                            count += "41FCC608-8496-4DEF-B43E-7D9BD675A6FF" in line
+                        if count < 2:
+                            system_reg.writelines([
+                                '[System\\\\ControlSet001\\\\Services\\\\nvlddmkm] 1699294680\n',
+                                '#time=1da10dd9364206e\n',
+                                '"{41FCC608-8496-4DEF-B43E-7D9BD675A6FF}"=hex:01\n',
+                                '\n',
+                                '[Software\\\\NVIDIA Corporation\\\\Global] 1699294680\n',
+                                '#time=1da10dd93641b32\n',
+                                '"{41FCC608-8496-4DEF-B43E-7D9BD675A6FF}"=hex:01\n'
+                            ])
+
+                    upscaler_to_use = os.environ["PROTON_UPSCALER"]
+                    upscaler_dir = os.path.join(g_proton.upscalers_dir, upscaler_to_use)
+                    for f in os.listdir(upscaler_dir):
+                        try_copy(os.path.join(upscaler_dir, f), "drive_c/windows/system32",
+                                prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
 
             setup_game_dir_drive()
             setup_steam_dir_drive()
