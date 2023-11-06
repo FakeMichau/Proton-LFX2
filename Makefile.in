@@ -651,7 +651,7 @@ $(OBJ)/.vkd3d-proton-post-build64:
 
 
 ##
-## LatencyFleX2
+## LatencyFleX2 and Upscalers
 ##
 $(OBJ)/.vkd3d-proton-post-build32:
 	mkdir -p "$(DST_DIR)"/lib/wine/lfx2
@@ -660,12 +660,6 @@ $(OBJ)/.vkd3d-proton-post-build32:
 $(OBJ)/.vkd3d-proton-post-build64:
 	mkdir -p "$(DST_DIR)"/lib64/wine/lfx2
 	cp $(SRCDIR)/lfx2-bin/latencyflex2_rust.dll "$(DST_DIR)"/lib64/wine/lfx2
-
-
-##
-## Upscalers
-##
-$(OBJ)/.vkd3d-proton-post-build64:
 	mkdir -p "$(DST_DIR)"/upscalers
 	cp -r $(SRCDIR)/upscalers/* "$(DST_DIR)"/upscalers
 
