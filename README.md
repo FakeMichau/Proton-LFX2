@@ -27,7 +27,7 @@ In case of issues you still can enable LatencyFlex 2 manually, without using the
 Upscalers
 ------------
 
-Still an experimental feature. Let's you use mods like CyberFSR, CyberXESS and similar that utilize `nvngx.dll` simply by using an environment variable - without needing to copy over files and dealing with registry changes, also making it easy to go between different versions.  
+Still an experimental feature. Let's you use mods like CyberFSR, CyberXESS and similar that utilize `nvngx.dll`, simply by using an environment variable - without needing to copy over files and deal with registry changes, also making it easy to go between different versions.  
 All upscalers are held in `Proton-LFX2/files/upscalers/` folder. The name of the folder is the name you need to use in the environment variable. To use it add
 
 `PROTON_UPSCALER=2.2.1`
