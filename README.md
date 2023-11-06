@@ -1,7 +1,7 @@
 Disclaimer
 ----------
 
-For basic info about Proton, usage and compilation read [Valve's README](https://github.com/ValveSoftware/Proton/blob/bleeding-edge/README.md)
+For basic info about Proton, usage and compilation read [Valve's README](https://github.com/ValveSoftware/Proton/blob/bleeding-edge/README.md#install-proton-locally)
 
 
 Introduction
