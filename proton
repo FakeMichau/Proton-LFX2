@@ -1004,7 +1004,7 @@ class CompatData:
                             count += "41FCC608-8496-4DEF-B43E-7D9BD675A6FF" in line
                         if count < 2:
                             system_reg.writelines([
-                                '[System\\\\ControlSet001\\\\Services\\\\nvlddmkm] 1699294680\n',
+                                '\n[System\\\\ControlSet001\\\\Services\\\\nvlddmkm] 1699294680\n',
                                 '#time=1da10dd9364206e\n',
                                 '"{41FCC608-8496-4DEF-B43E-7D9BD675A6FF}"=hex:01\n',
                                 '\n',
@@ -1015,9 +1015,19 @@ class CompatData:
 
                     upscaler_to_use = os.environ["PROTON_UPSCALER"]
                     upscaler_dir = os.path.join(g_proton.upscalers_dir, upscaler_to_use)
-                    for f in os.listdir(upscaler_dir):
-                        try_copy(os.path.join(upscaler_dir, f), "drive_c/windows/system32",
-                                prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                    if os.path.exists(upscaler_dir): 
+                        files = os.listdir(upscaler_dir)
+                        if [file for file in files if file.endswith('.dll')]:
+                            for f in files:
+                                try_copy(os.path.join(upscaler_dir, f), "drive_c/windows/system32",
+                                        prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                            sys.stderr.write("Upscaler: Using PROTON_UPSCALER=" + upscaler_to_use + os.linesep)
+                        else:
+                            sys.stderr.write("Upscaler: No DLL file found in the given folder" + os.linesep)
+                    else:
+                        sys.stderr.write("Upscaler: Folder " + upscaler_to_use + " doesn't exist" + os.linesep)
+                    sys.stderr.flush()
+
 
             setup_game_dir_drive()
             setup_steam_dir_drive()
