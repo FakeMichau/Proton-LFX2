@@ -1,0 +1,3238 @@
+From ff4db114a05b24a5442fffaa4b1757d05731d9f0 Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Sat, 31 Dec 2022 23:07:33 +0900
+Subject: [PATCH 01/12] lfx2 wip
+
+---
+ include/latencyflex2.h          | 62 +++++++++++++++++++++
+ src/d3d11/d3d11_context.cpp     |  3 +-
+ src/d3d11/d3d11_context_ext.cpp | 38 +++++++++++++
+ src/d3d11/d3d11_context_ext.h   |  8 ++-
+ src/d3d11/d3d11_device.cpp      |  3 +
+ src/d3d11/d3d11_interfaces.h    | 14 +++++
+ src/dxvk/dxvk_cmdlist.cpp       |  4 +-
+ src/dxvk/dxvk_cmdlist.h         |  8 +++
+ src/dxvk/dxvk_context.cpp       |  4 ++
+ src/dxvk/dxvk_context.h         |  2 +
+ src/dxvk/dxvk_device.h          |  5 ++
+ src/dxvk/dxvk_extensions.h      |  1 +
+ src/dxvk/dxvk_gpu_query.h       |  1 +
+ src/dxvk/dxvk_lfx2.cpp          | 98 +++++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_lfx2.h            | 48 ++++++++++++++++
+ src/dxvk/meson.build            |  1 +
+ src/util/util_time.h            |  6 +-
+ src/vulkan/vulkan_loader.h      |  5 ++
+ 18 files changed, 307 insertions(+), 4 deletions(-)
+ create mode 100644 include/latencyflex2.h
+ create mode 100644 src/dxvk/dxvk_lfx2.cpp
+ create mode 100644 src/dxvk/dxvk_lfx2.h
+
+diff --git a/include/latencyflex2.h b/include/latencyflex2.h
+new file mode 100644
+index 00000000..5513093c
+--- /dev/null
++++ b/include/latencyflex2.h
+@@ -0,0 +1,62 @@
++#ifndef LATENCYFLEX2_H
++#define LATENCYFLEX2_H
++
++#include <cstdarg>
++#include <cstddef>
++#include <cstdint>
++#include <cstdlib>
++#include <ostream>
++#include <new>
++#ifdef _WIN32
++#define LFX2_API __declspec(dllimport)
++#else
++#define LFX2_API
++#endif
++
++
++enum class lfx2MarkType {
++  lfx2MarkTypeBegin,
++  lfx2MarkTypeEnd,
++};
++
++struct lfx2Context;
++
++/// A write handle for frame markers.
++struct lfx2Frame;
++
++using lfx2Timestamp = uint64_t;
++
++using lfx2SectionId = uint32_t;
++
++
++extern "C" {
++
++LFX2_API lfx2Timestamp lfx2TimestampNow();
++
++#if defined(_WIN32)
++LFX2_API lfx2Timestamp lfx2TimestampFromQpc(uint64_t qpc);
++#endif
++
++LFX2_API void lfx2SleepUntil(lfx2Timestamp target);
++
++LFX2_API const lfx2Context *lfx2ContextCreate();
++
++LFX2_API void lfx2ContextAddRef(const lfx2Context *context);
++
++LFX2_API void lfx2ContextRelease(const lfx2Context *context);
++
++LFX2_API const lfx2Frame *lfx2FrameCreate(const lfx2Context *context, lfx2Timestamp *out_timestamp);
++
++LFX2_API void lfx2FrameAddRef(const lfx2Frame *frame);
++
++LFX2_API void lfx2FrameRelease(const lfx2Frame *frame);
++
++LFX2_API
++void lfx2MarkSection(const lfx2Frame *frame,
++                     lfx2SectionId section_id,
++                     lfx2MarkType mark_type,
++                     lfx2Timestamp timestamp);
++
++} // extern "C"
++
++#endif // LATENCYFLEX2_H
+diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
+index 977a403e..a24b78b0 100644
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -50,7 +50,8 @@ namespace dxvk {
+     }
+ 
+     if (riid == __uuidof(ID3D11VkExtContext)
+-     || riid == __uuidof(ID3D11VkExtContext1)) {
++     || riid == __uuidof(ID3D11VkExtContext1)
++     || riid == __uuidof(ID3D11VkExtContext2)) {
+       *ppvObject = ref(&m_contextExt);
+       return S_OK;
+     }
+diff --git a/src/d3d11/d3d11_context_ext.cpp b/src/d3d11/d3d11_context_ext.cpp
+index c89e0bc0..be412630 100644
+--- a/src/d3d11/d3d11_context_ext.cpp
++++ b/src/d3d11/d3d11_context_ext.cpp
+@@ -215,6 +215,44 @@ namespace dxvk {
+     return true;
+   }
+ 
++  template<typename ContextType>
++  bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::MarkRenderStartLFX2(void *frame) {
++    auto query = m_ctx->m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
++
++    m_ctx->m_device->lfx2().FrameAddRef(static_cast<const lfx2Frame *>(frame));
++    m_ctx->EmitCs([query, frame, cDevice = m_ctx->m_device] (DxvkContext* ctx) {
++      auto &cLfx2 = cDevice->lfx2();
++      cLfx2.MarkSection(static_cast<const lfx2Frame *>(frame), 800, lfx2MarkType::lfx2MarkTypeBegin, cLfx2.TimestampNow());
++      ctx->writeTimestamp(query);
++      ctx->trackLatencyMarker(frame, query, false);
++    });
++    return true;
++  }
++
++  template<typename ContextType>
++  bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::MarkRenderEndLFX2(void *frame) {
++    auto query = m_ctx->m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
++
++    m_ctx->m_device->lfx2().FrameAddRef(static_cast<const lfx2Frame *>(frame));
++    m_ctx->EmitCs([query, frame, cDevice = m_ctx->m_device] (DxvkContext* ctx) {
++      auto &cLfx2 = cDevice->lfx2();
++      cLfx2.MarkSection(static_cast<const lfx2Frame *>(frame), 800, lfx2MarkType::lfx2MarkTypeEnd, cLfx2.TimestampNow());
++      ctx->writeTimestamp(query);
++      ctx->trackLatencyMarker(frame, query, true);
++    });
++    return true;
++  }
++
++  template<typename ContextType>
++  bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::SleepAndBeginFrameLFX2() {
++    Logger::err("SleepAndBeginFrameLFX2 should be only called on an immediate context");
++    return false;
++  }
++
++  template<>
++  bool STDMETHODCALLTYPE D3D11DeviceContextExt<D3D11ImmediateContext>::SleepAndBeginFrameLFX2() {
++    return true;
++  }
+ 
+   template class D3D11DeviceContextExt<D3D11DeferredContext>;
+   template class D3D11DeviceContextExt<D3D11ImmediateContext>;
+diff --git a/src/d3d11/d3d11_context_ext.h b/src/d3d11/d3d11_context_ext.h
+index 6b95dcf9..e9951d27 100644
+--- a/src/d3d11/d3d11_context_ext.h
++++ b/src/d3d11/d3d11_context_ext.h
+@@ -8,7 +8,7 @@ namespace dxvk {
+   class D3D11ImmediateContext;
+ 
+   template<typename ContextType>
+-  class D3D11DeviceContextExt : public ID3D11VkExtContext1 {
++  class D3D11DeviceContextExt : public ID3D11VkExtContext2 {
+     
+   public:
+     
+@@ -71,6 +71,12 @@ namespace dxvk {
+             void* const*            pWriteResources,
+             uint32_t                NumWriteResources);
+ 
++    bool STDMETHODCALLTYPE MarkRenderStartLFX2(void *lfx2Frame);
++
++    bool STDMETHODCALLTYPE MarkRenderEndLFX2(void *lfx2Frame);
++
++    bool STDMETHODCALLTYPE SleepAndBeginFrameLFX2();
++
+   private:
+     
+     ContextType* m_ctx;
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 9398e484..078dcb4b 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -2469,6 +2469,9 @@ namespace dxvk {
+         return deviceFeatures.nvxBinaryImport
+             && deviceFeatures.vk12.bufferDeviceAddress;
+ 
++      case D3D11_VK_LATENCYFLEX2:
++        return true; // TODO
++
+       default:
+         return false;
+     }
+diff --git a/src/d3d11/d3d11_interfaces.h b/src/d3d11/d3d11_interfaces.h
+index 587cde13..1e1071d1 100644
+--- a/src/d3d11/d3d11_interfaces.h
++++ b/src/d3d11/d3d11_interfaces.h
+@@ -16,6 +16,7 @@ enum D3D11_VK_EXTENSION : uint32_t {
+   D3D11_VK_EXT_BARRIER_CONTROL            = 3,
+   D3D11_VK_NVX_BINARY_IMPORT              = 4,
+   D3D11_VK_NVX_IMAGE_VIEW_HANDLE          = 5,
++  D3D11_VK_LATENCYFLEX2                   = 6,
+ };
+ 
+ 
+@@ -182,6 +183,17 @@ ID3D11VkExtContext1 : public ID3D11VkExtContext {
+           uint32_t                numWriteResources) = 0;
+ };
+ 
++MIDL_INTERFACE("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")
++ID3D11VkExtContext2 : public ID3D11VkExtContext1 {
++
++  virtual bool STDMETHODCALLTYPE MarkRenderStartLFX2(
++      void*                   lfx2Frame) = 0;
++
++  virtual bool STDMETHODCALLTYPE MarkRenderEndLFX2(
++      void*                   lfx2Frame) = 0;
++
++};
++
+ 
+ #ifdef _MSC_VER
+ struct __declspec(uuid("bb8a4fb9-3935-4762-b44b-35189a26414a")) ID3D11VkExtShader;
+@@ -189,10 +201,12 @@ struct __declspec(uuid("8a6e3c42-f74c-45b7-8265-a231b677ca17")) ID3D11VkExtDevic
+ struct __declspec(uuid("cfcf64ef-9586-46d0-bca4-97cf2ca61b06")) ID3D11VkExtDevice1;
+ struct __declspec(uuid("fd0bca13-5cb6-4c3a-987e-4750de2ca791")) ID3D11VkExtContext;
+ struct __declspec(uuid("874b09b2-ae0b-41d8-8476-5f3b7a0e879d")) ID3D11VkExtContext1;
++struct __declspec(uuid("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")) ID3D11VkExtContext2;
+ #else
+ __CRT_UUID_DECL(ID3D11VkExtShader,         0xbb8a4fb9,0x3935,0x4762,0xb4,0x4b,0x35,0x18,0x9a,0x26,0x41,0x4a);
+ __CRT_UUID_DECL(ID3D11VkExtDevice,         0x8a6e3c42,0xf74c,0x45b7,0x82,0x65,0xa2,0x31,0xb6,0x77,0xca,0x17);
+ __CRT_UUID_DECL(ID3D11VkExtDevice1,        0xcfcf64ef,0x9586,0x46d0,0xbc,0xa4,0x97,0xcf,0x2c,0xa6,0x1b,0x06);
+ __CRT_UUID_DECL(ID3D11VkExtContext,        0xfd0bca13,0x5cb6,0x4c3a,0x98,0x7e,0x47,0x50,0xde,0x2c,0xa7,0x91);
+ __CRT_UUID_DECL(ID3D11VkExtContext1,       0x874b09b2,0xae0b,0x41d8,0x84,0x76,0x5f,0x3b,0x7a,0x0e,0x87,0x9d);
++__CRT_UUID_DECL(ID3D11VkExtContext2,       0x6e65f21a,0x0ecd,0x4e76,0x8f,0xaf,0x9e,0x9a,0xfa,0x40,0x93,0xa4);
+ #endif
+diff --git a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
+index 3bd3aa95..ad190fc0 100644
+--- a/src/dxvk/dxvk_cmdlist.cpp
++++ b/src/dxvk/dxvk_cmdlist.cpp
+@@ -170,7 +170,8 @@ namespace dxvk {
+   DxvkCommandList::DxvkCommandList(DxvkDevice* device)
+   : m_device        (device),
+     m_vkd           (device->vkd()),
+-    m_vki           (device->instance()->vki()) {
++    m_vki           (device->instance()->vki()),
++    m_lfx2Tracker   (device) {
+     const auto& graphicsQueue = m_device->queues().graphics;
+     const auto& transferQueue = m_device->queues().transfer;
+ 
+@@ -374,6 +375,7 @@ namespace dxvk {
+     // Return query and event handles
+     m_gpuQueryTracker.reset();
+     m_gpuEventTracker.reset();
++    m_lfx2Tracker.reset();
+ 
+     // Less important stuff
+     m_signalTracker.reset();
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+index b9b9a165..7defe86d 100644
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <limits>
++#include <utility>
+ 
+ #include "dxvk_bind_mask.h"
+ #include "dxvk_buffer.h"
+@@ -17,6 +18,7 @@
+ #include "dxvk_sparse.h"
+ #include "dxvk_staging.h"
+ #include "dxvk_stats.h"
++#include "dxvk_lfx2.h"
+ 
+ namespace dxvk {
+   
+@@ -319,12 +321,17 @@ namespace dxvk {
+       m_signalTracker.add(signal, value);
+     }
+ 
++    void trackLatencyMarker(void *lfx2Frame, Rc<DxvkGpuQuery> timestampQuery, bool end) {
++      m_lfx2Tracker.add(lfx2Frame, std::move(timestampQuery), end);
++    }
++
+     /**
+      * \brief Notifies resources and signals
+      */
+     void notifyObjects() {
+       m_resources.notify();
+       m_signalTracker.notify();
++      m_lfx2Tracker.notify();
+     }
+ 
+     /**
+@@ -1050,6 +1057,7 @@ namespace dxvk {
+     DxvkGpuQueryTracker       m_gpuQueryTracker;
+     DxvkBufferTracker         m_bufferTracker;
+     DxvkStatCounters          m_statCounters;
++    DxvkLfx2Tracker           m_lfx2Tracker;
+ 
+     DxvkCommandSubmission     m_commandSubmission;
+ 
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 80c2620d..89decd8c 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -6444,4 +6444,8 @@ namespace dxvk {
+     this->beginCurrentCommands();
+   }
+ 
++  void DxvkContext::trackLatencyMarker(void *frame, Rc<DxvkGpuQuery> timestampQuery, bool end) {
++    m_cmd->trackLatencyMarker(frame, std::move(timestampQuery), end);
++  }
++
+ }
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 93ed91e3..1572e40f 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -1388,6 +1388,8 @@ namespace dxvk {
+         m_cmd->addStatCtr(counter, value);
+     }
+ 
++    void trackLatencyMarker(void *frame, Rc<DxvkGpuQuery> timestampQuery, bool end);
++
+   private:
+     
+     Rc<DxvkDevice>          m_device;
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+index a24ee311..5b3a1f04 100644
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -98,6 +98,10 @@ namespace dxvk {
+     Rc<vk::DeviceFn> vkd() const {
+       return m_vkd;
+     }
++
++    const DxvkLfx2 &lfx2() const {
++      return m_lfx2;
++    }
+     
+     /**
+      * \brief Logical device handle
+@@ -542,6 +546,7 @@ namespace dxvk {
+     Rc<DxvkInstance>            m_instance;
+     Rc<DxvkAdapter>             m_adapter;
+     Rc<vk::DeviceFn>            m_vkd;
++    DxvkLfx2                    m_lfx2;
+ 
+     DxvkDeviceFeatures          m_features;
+     DxvkDeviceInfo              m_properties;
+diff --git a/src/dxvk/dxvk_extensions.h b/src/dxvk/dxvk_extensions.h
+index 8164ccf6..59bf0cdd 100644
+--- a/src/dxvk/dxvk_extensions.h
++++ b/src/dxvk/dxvk_extensions.h
+@@ -297,6 +297,7 @@ namespace dxvk {
+     DxvkExt amdMemoryOverallocationBehaviour  = { VK_AMD_MEMORY_OVERALLOCATION_BEHAVIOR_EXTENSION_NAME,     DxvkExtMode::Optional };
+     DxvkExt amdShaderFragmentMask             = { VK_AMD_SHADER_FRAGMENT_MASK_EXTENSION_NAME,               DxvkExtMode::Optional };
+     DxvkExt extAttachmentFeedbackLoopLayout   = { VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME,    DxvkExtMode::Optional };
++    DxvkExt extCalibratedTimestamps           = { VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,              DxvkExtMode::Optional };
+     DxvkExt extConservativeRasterization      = { VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,         DxvkExtMode::Optional };
+     DxvkExt extCustomBorderColor              = { VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME,                DxvkExtMode::Optional };
+     DxvkExt extDepthClipEnable                = { VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME,                  DxvkExtMode::Optional };
+diff --git a/src/dxvk/dxvk_gpu_query.h b/src/dxvk/dxvk_gpu_query.h
+index 919d0e26..acf1654e 100644
+--- a/src/dxvk/dxvk_gpu_query.h
++++ b/src/dxvk/dxvk_gpu_query.h
+@@ -11,6 +11,7 @@
+ namespace dxvk {
+ 
+   class DxvkCommandList;
++  class DxvkDevice;
+ 
+   class DxvkGpuQueryPool;
+   class DxvkGpuQueryAllocator;
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+new file mode 100644
+index 00000000..ccb1ad1e
+--- /dev/null
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -0,0 +1,98 @@
++#include "dxvk_lfx2.h"
++
++#include "../util/util_time.h"
++#include "dxvk_device.h"
++
++namespace dxvk {
++
++  DxvkLfx2::DxvkLfx2() {
++    const auto lfxModuleName = "latencyflex2_rust.dll";
++
++    m_lfxModule = ::LoadLibraryA(lfxModuleName);
++    if (m_lfxModule == nullptr) {
++      Logger::err(str::format("Failed to load ", lfxModuleName));
++      return;
++    }
++
++#define LOAD_PFN(x) \
++    this->x = GetProcAddress<decltype(&::lfx2##x)>("lfx2" #x)
++
++    LOAD_PFN(ContextCreate);
++    LOAD_PFN(ContextAddRef);
++    LOAD_PFN(ContextRelease);
++    LOAD_PFN(FrameCreate);
++    LOAD_PFN(FrameAddRef);
++    LOAD_PFN(FrameRelease);
++    LOAD_PFN(MarkSection);
++    LOAD_PFN(SleepUntil);
++    LOAD_PFN(TimestampNow);
++
++#undef LOAD_PFN
++  }
++
++  DxvkLfx2::~DxvkLfx2() {
++    if (m_lfxModule == nullptr)
++      return;
++
++    ::FreeLibrary(m_lfxModule);
++    m_lfxModule = nullptr;
++  }
++
++  template <typename T>
++  T DxvkLfx2::GetProcAddress(const char* name) {
++    return reinterpret_cast<T>(reinterpret_cast<void*>(::GetProcAddress(m_lfxModule, name)));
++  }
++
++  DxvkLfx2Tracker::DxvkLfx2Tracker(DxvkDevice *device) : m_device(device) {
++  }
++
++  void DxvkLfx2Tracker::add(void *lfx2Frame, Rc<DxvkGpuQuery> query, bool end) {
++    m_query[end] = std::move(query);
++    m_frame_handle[end] = lfx2Frame;
++  }
++
++  void DxvkLfx2Tracker::notify() {
++    for (uint32_t i = 0; i < 2; i++) {
++      Rc<DxvkGpuQuery> &query = m_query[i];
++      if (query.ptr()) {
++        DxvkQueryData queryData; // NOLINT(cppcoreguidelines-pro-type-member-init)
++        DxvkGpuQueryStatus status;
++        while ((status = query->getData(queryData)) == DxvkGpuQueryStatus::Pending);
++
++        if (status == DxvkGpuQueryStatus::Available) {
++          uint64_t gpuTimestamp = queryData.timestamp.time;
++          VkCalibratedTimestampInfoEXT calibratedTimestampInfo[2];
++          uint64_t calibratedTimestamps[2];
++          uint64_t maxDeviation[2];
++          calibratedTimestampInfo[0].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
++          calibratedTimestampInfo[0].pNext = nullptr;
++          calibratedTimestampInfo[0].timeDomain = VK_TIME_DOMAIN_DEVICE_EXT;
++          calibratedTimestampInfo[1].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
++          calibratedTimestampInfo[1].pNext = nullptr;
++          calibratedTimestampInfo[1].timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT;
++          m_device->vkd()->vkGetCalibratedTimestampsEXT(m_device->handle(), 2, calibratedTimestampInfo,
++                                                        calibratedTimestamps, maxDeviation);
++
++          uint64_t hostNsTimestamp = dxvk::high_resolution_clock::to_ns(calibratedTimestamps[1]);
++          int64_t gpuTimestampDelta = gpuTimestamp - calibratedTimestamps[0];
++          int64_t timestamp = hostNsTimestamp + (int64_t) (gpuTimestampDelta *
++                                                           (double) m_device->adapter()->deviceProperties().limits.timestampPeriod);
++
++          m_device->lfx2().MarkSection(static_cast<const lfx2Frame *>(m_frame_handle[i]),
++                          1000, i == 0 ? lfx2MarkType::lfx2MarkTypeBegin : lfx2MarkType::lfx2MarkTypeEnd, timestamp);
++          m_device->lfx2().FrameRelease(static_cast<const lfx2Frame *>(m_frame_handle[i]));
++        }
++      }
++    }
++  }
++
++  void DxvkLfx2Tracker::reset() {
++    for (auto &i: m_query) {
++      i = nullptr;
++    }
++    for (auto &i: m_frame_handle) {
++      i = nullptr;
++    }
++  }
++
++} // dxvk
+\ No newline at end of file
+diff --git a/src/dxvk/dxvk_lfx2.h b/src/dxvk/dxvk_lfx2.h
+new file mode 100644
+index 00000000..f56fa608
+--- /dev/null
++++ b/src/dxvk/dxvk_lfx2.h
+@@ -0,0 +1,48 @@
++#pragma once
++
++#include "dxvk_gpu_query.h"
++#include "latencyflex2.h"
++
++namespace dxvk {
++
++  class DxvkLfx2 {
++  public:
++    DxvkLfx2();
++    virtual ~DxvkLfx2();
++
++#define DECLARE_PFN(x) \
++    decltype(&::lfx2##x) x {}
++
++    DECLARE_PFN(ContextCreate);
++    DECLARE_PFN(ContextAddRef);
++    DECLARE_PFN(ContextRelease);
++    DECLARE_PFN(FrameCreate);
++    DECLARE_PFN(FrameAddRef);
++    DECLARE_PFN(FrameRelease);
++    DECLARE_PFN(MarkSection);
++    DECLARE_PFN(SleepUntil);
++    DECLARE_PFN(TimestampNow);
++
++#undef DECLARE_PFN
++
++  private:
++    template <typename T>
++    T GetProcAddress(const char* name);
++
++    HMODULE m_lfxModule{};
++  };
++
++  class DxvkLfx2Tracker {
++  public:
++    explicit DxvkLfx2Tracker(DxvkDevice *device);
++    void add(void *lfx2Frame, Rc<DxvkGpuQuery> query, bool end);
++    void reset();
++    void notify();
++
++  private:
++    DxvkDevice *m_device;
++    Rc<DxvkGpuQuery> m_query[2]{};
++    void *m_frame_handle[2]{};
++  };
++
++} // dxvk
+\ No newline at end of file
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index 2bf46c5f..fa174987 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -82,6 +82,7 @@ dxvk_src = [
+   'dxvk_image.cpp',
+   'dxvk_instance.cpp',
+   'dxvk_lifetime.cpp',
++  'dxvk_lfx2.cpp',
+   'dxvk_memory.cpp',
+   'dxvk_meta_blit.cpp',
+   'dxvk_meta_clear.cpp',
+diff --git a/src/util/util_time.h b/src/util/util_time.h
+index bcc311b6..c62f1065 100644
+--- a/src/util/util_time.h
++++ b/src/util/util_time.h
+@@ -23,13 +23,17 @@ namespace dxvk {
+     }
+ 
+     static inline time_point get_time_from_counter(int64_t counter) {
++      return time_point(duration(to_ns(counter)));
++    }
++
++    static inline int64_t to_ns(int64_t counter) {
+       // Keep the frequency static, this doesn't change at all.
+       static const int64_t freq = get_frequency();
+ 
+       const int64_t whole = (counter / freq) * period::den;
+       const int64_t part  = (counter % freq) * period::den / freq;
+ 
+-      return time_point(duration(whole + part));
++      return whole + part;
+     }
+ 
+     static inline int64_t get_frequency() {
+diff --git a/src/vulkan/vulkan_loader.h b/src/vulkan/vulkan_loader.h
+index 1741ccb8..630dfb7b 100644
+--- a/src/vulkan/vulkan_loader.h
++++ b/src/vulkan/vulkan_loader.h
+@@ -452,6 +452,11 @@ namespace dxvk::vk {
+     VULKAN_FN(wine_vkAcquireKeyedMutex);
+     VULKAN_FN(wine_vkReleaseKeyedMutex);
+     #endif
++
++    #ifdef VK_EXT_calibrated_timestamps
++    VULKAN_FN(vkGetPhysicalDeviceCalibrateableTimeDomainsEXT);
++    VULKAN_FN(vkGetCalibratedTimestampsEXT);
++    #endif
+   };
+   
+ }
+-- 
+2.43.0
+
+
+From 5ed5522ab2006db98bc07a7c883ebc2918a3c928 Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Sat, 31 Dec 2022 23:30:09 +0900
+Subject: [PATCH 02/12] unix compat for ci
+
+---
+ src/dxvk/dxvk_lfx2.cpp | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+index ccb1ad1e..1bea5bbe 100644
+--- a/src/dxvk/dxvk_lfx2.cpp
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -2,11 +2,16 @@
+ 
+ #include "../util/util_time.h"
+ #include "dxvk_device.h"
++#include "../util/util_win32_compat.h"
+ 
+ namespace dxvk {
+ 
+   DxvkLfx2::DxvkLfx2() {
++#ifdef _WIN32
+     const auto lfxModuleName = "latencyflex2_rust.dll";
++#else
++    const auto lfxModuleName = "liblatencyflex2_rust.so";
++#endif
+ 
+     m_lfxModule = ::LoadLibraryA(lfxModuleName);
+     if (m_lfxModule == nullptr) {
+@@ -38,9 +43,9 @@ namespace dxvk {
+     m_lfxModule = nullptr;
+   }
+ 
+-  template <typename T>
+-  T DxvkLfx2::GetProcAddress(const char* name) {
+-    return reinterpret_cast<T>(reinterpret_cast<void*>(::GetProcAddress(m_lfxModule, name)));
++  template<typename T>
++  T DxvkLfx2::GetProcAddress(const char *name) {
++    return reinterpret_cast<T>(reinterpret_cast<void *>(::GetProcAddress(m_lfxModule, name)));
+   }
+ 
+   DxvkLfx2Tracker::DxvkLfx2Tracker(DxvkDevice *device) : m_device(device) {
+@@ -79,7 +84,8 @@ namespace dxvk {
+                                                            (double) m_device->adapter()->deviceProperties().limits.timestampPeriod);
+ 
+           m_device->lfx2().MarkSection(static_cast<const lfx2Frame *>(m_frame_handle[i]),
+-                          1000, i == 0 ? lfx2MarkType::lfx2MarkTypeBegin : lfx2MarkType::lfx2MarkTypeEnd, timestamp);
++                                       1000, i == 0 ? lfx2MarkType::lfx2MarkTypeBegin : lfx2MarkType::lfx2MarkTypeEnd,
++                                       timestamp);
+           m_device->lfx2().FrameRelease(static_cast<const lfx2Frame *>(m_frame_handle[i]));
+         }
+       }
+-- 
+2.43.0
+
+
+From f6d5cda6ccfce58d5a6432fedeb12904541e8c6d Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Sat, 31 Dec 2022 23:33:17 +0900
+Subject: [PATCH 03/12] more win32 compat for ci
+
+---
+ src/dxvk/dxvk_lfx2.cpp | 13 ++++++++++++-
+ src/dxvk/dxvk_lfx2.h   |  3 +++
+ src/util/util_time.h   |  6 +-----
+ 3 files changed, 16 insertions(+), 6 deletions(-)
+
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+index 1bea5bbe..494256d5 100644
+--- a/src/dxvk/dxvk_lfx2.cpp
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -31,6 +31,9 @@ namespace dxvk {
+     LOAD_PFN(MarkSection);
+     LOAD_PFN(SleepUntil);
+     LOAD_PFN(TimestampNow);
++#ifdef _WIN32
++    LOAD_PFN(TimestampFromQpc);
++#endif
+ 
+ #undef LOAD_PFN
+   }
+@@ -74,11 +77,19 @@ namespace dxvk {
+           calibratedTimestampInfo[0].timeDomain = VK_TIME_DOMAIN_DEVICE_EXT;
+           calibratedTimestampInfo[1].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
+           calibratedTimestampInfo[1].pNext = nullptr;
++#ifdef _WIN32
+           calibratedTimestampInfo[1].timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT;
++#else
++          calibratedTimestampInfo[1].timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT;
++#endif
+           m_device->vkd()->vkGetCalibratedTimestampsEXT(m_device->handle(), 2, calibratedTimestampInfo,
+                                                         calibratedTimestamps, maxDeviation);
+ 
+-          uint64_t hostNsTimestamp = dxvk::high_resolution_clock::to_ns(calibratedTimestamps[1]);
++#ifdef _WIN32
++          uint64_t hostNsTimestamp = m_device->lfx2().TimestampFromQpc(calibratedTimestamps[1]);
++#else
++          uint64_t hostNsTimestamp = calibratedTimestamps[1];
++#endif
+           int64_t gpuTimestampDelta = gpuTimestamp - calibratedTimestamps[0];
+           int64_t timestamp = hostNsTimestamp + (int64_t) (gpuTimestampDelta *
+                                                            (double) m_device->adapter()->deviceProperties().limits.timestampPeriod);
+diff --git a/src/dxvk/dxvk_lfx2.h b/src/dxvk/dxvk_lfx2.h
+index f56fa608..1f5c5b5f 100644
+--- a/src/dxvk/dxvk_lfx2.h
++++ b/src/dxvk/dxvk_lfx2.h
+@@ -22,6 +22,9 @@ namespace dxvk {
+     DECLARE_PFN(MarkSection);
+     DECLARE_PFN(SleepUntil);
+     DECLARE_PFN(TimestampNow);
++#ifdef _WIN32
++    DECLARE_PFN(TimestampFromQpc);
++#endif
+ 
+ #undef DECLARE_PFN
+ 
+diff --git a/src/util/util_time.h b/src/util/util_time.h
+index c62f1065..bcc311b6 100644
+--- a/src/util/util_time.h
++++ b/src/util/util_time.h
+@@ -23,17 +23,13 @@ namespace dxvk {
+     }
+ 
+     static inline time_point get_time_from_counter(int64_t counter) {
+-      return time_point(duration(to_ns(counter)));
+-    }
+-
+-    static inline int64_t to_ns(int64_t counter) {
+       // Keep the frequency static, this doesn't change at all.
+       static const int64_t freq = get_frequency();
+ 
+       const int64_t whole = (counter / freq) * period::den;
+       const int64_t part  = (counter % freq) * period::den / freq;
+ 
+-      return whole + part;
++      return time_point(duration(whole + part));
+     }
+ 
+     static inline int64_t get_frequency() {
+-- 
+2.43.0
+
+
+From 9c1a182ce8f9722c56335a170853d06bf4bae214 Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Sun, 1 Jan 2023 16:04:13 +0900
+Subject: [PATCH 04/12] deconstify
+
+---
+ include/latencyflex2.h          | 14 +++++++-------
+ src/d3d11/d3d11_context_ext.cpp |  8 ++++----
+ src/dxvk/dxvk_lfx2.cpp          |  4 ++--
+ 3 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/include/latencyflex2.h b/include/latencyflex2.h
+index 5513093c..6978e2af 100644
+--- a/include/latencyflex2.h
++++ b/include/latencyflex2.h
+@@ -39,20 +39,20 @@ LFX2_API lfx2Timestamp lfx2TimestampFromQpc(uint64_t qpc);
+ 
+ LFX2_API void lfx2SleepUntil(lfx2Timestamp target);
+ 
+-LFX2_API const lfx2Context *lfx2ContextCreate();
++LFX2_API lfx2Context *lfx2ContextCreate();
+ 
+-LFX2_API void lfx2ContextAddRef(const lfx2Context *context);
++LFX2_API void lfx2ContextAddRef(lfx2Context *context);
+ 
+-LFX2_API void lfx2ContextRelease(const lfx2Context *context);
++LFX2_API void lfx2ContextRelease(lfx2Context *context);
+ 
+-LFX2_API const lfx2Frame *lfx2FrameCreate(const lfx2Context *context, lfx2Timestamp *out_timestamp);
++LFX2_API lfx2Frame *lfx2FrameCreate(lfx2Context *context, lfx2Timestamp *out_timestamp);
+ 
+-LFX2_API void lfx2FrameAddRef(const lfx2Frame *frame);
++LFX2_API void lfx2FrameAddRef(lfx2Frame *frame);
+ 
+-LFX2_API void lfx2FrameRelease(const lfx2Frame *frame);
++LFX2_API void lfx2FrameRelease(lfx2Frame *frame);
+ 
+ LFX2_API
+-void lfx2MarkSection(const lfx2Frame *frame,
++void lfx2MarkSection(lfx2Frame *frame,
+                      lfx2SectionId section_id,
+                      lfx2MarkType mark_type,
+                      lfx2Timestamp timestamp);
+diff --git a/src/d3d11/d3d11_context_ext.cpp b/src/d3d11/d3d11_context_ext.cpp
+index be412630..cd1a7d1d 100644
+--- a/src/d3d11/d3d11_context_ext.cpp
++++ b/src/d3d11/d3d11_context_ext.cpp
+@@ -219,10 +219,10 @@ namespace dxvk {
+   bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::MarkRenderStartLFX2(void *frame) {
+     auto query = m_ctx->m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+ 
+-    m_ctx->m_device->lfx2().FrameAddRef(static_cast<const lfx2Frame *>(frame));
++    m_ctx->m_device->lfx2().FrameAddRef(static_cast<lfx2Frame *>(frame));
+     m_ctx->EmitCs([query, frame, cDevice = m_ctx->m_device] (DxvkContext* ctx) {
+       auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.MarkSection(static_cast<const lfx2Frame *>(frame), 800, lfx2MarkType::lfx2MarkTypeBegin, cLfx2.TimestampNow());
++      cLfx2.MarkSection(static_cast<lfx2Frame *>(frame), 800, lfx2MarkType::lfx2MarkTypeBegin, cLfx2.TimestampNow());
+       ctx->writeTimestamp(query);
+       ctx->trackLatencyMarker(frame, query, false);
+     });
+@@ -233,10 +233,10 @@ namespace dxvk {
+   bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::MarkRenderEndLFX2(void *frame) {
+     auto query = m_ctx->m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+ 
+-    m_ctx->m_device->lfx2().FrameAddRef(static_cast<const lfx2Frame *>(frame));
++    m_ctx->m_device->lfx2().FrameAddRef(static_cast<lfx2Frame *>(frame));
+     m_ctx->EmitCs([query, frame, cDevice = m_ctx->m_device] (DxvkContext* ctx) {
+       auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.MarkSection(static_cast<const lfx2Frame *>(frame), 800, lfx2MarkType::lfx2MarkTypeEnd, cLfx2.TimestampNow());
++      cLfx2.MarkSection(static_cast<lfx2Frame *>(frame), 800, lfx2MarkType::lfx2MarkTypeEnd, cLfx2.TimestampNow());
+       ctx->writeTimestamp(query);
+       ctx->trackLatencyMarker(frame, query, true);
+     });
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+index 494256d5..f56bcb51 100644
+--- a/src/dxvk/dxvk_lfx2.cpp
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -94,10 +94,10 @@ namespace dxvk {
+           int64_t timestamp = hostNsTimestamp + (int64_t) (gpuTimestampDelta *
+                                                            (double) m_device->adapter()->deviceProperties().limits.timestampPeriod);
+ 
+-          m_device->lfx2().MarkSection(static_cast<const lfx2Frame *>(m_frame_handle[i]),
++          m_device->lfx2().MarkSection(static_cast<lfx2Frame *>(m_frame_handle[i]),
+                                        1000, i == 0 ? lfx2MarkType::lfx2MarkTypeBegin : lfx2MarkType::lfx2MarkTypeEnd,
+                                        timestamp);
+-          m_device->lfx2().FrameRelease(static_cast<const lfx2Frame *>(m_frame_handle[i]));
++          m_device->lfx2().FrameRelease(static_cast<lfx2Frame *>(m_frame_handle[i]));
+         }
+       }
+     }
+-- 
+2.43.0
+
+
+From cb9b01cc92efbc5f79006fcd1b77b18896ad9b7c Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Mon, 2 Jan 2023 12:08:47 +0900
+Subject: [PATCH 05/12] pch
+
+---
+ src/d3d11/meson.build | 1 +
+ src/d3d9/meson.build  | 1 +
+ src/dxvk/meson.build  | 1 +
+ src/pch/d3d11_pch.h   | 9 +++++++++
+ src/pch/d3d9_pch.h    | 7 +++++++
+ src/pch/dxvk_pch.h    | 7 +++++++
+ 6 files changed, 26 insertions(+)
+ create mode 100644 src/pch/d3d11_pch.h
+ create mode 100644 src/pch/d3d9_pch.h
+ create mode 100644 src/pch/dxvk_pch.h
+
+diff --git a/src/d3d11/meson.build b/src/d3d11/meson.build
+index 9b51e6ea..218d7c6a 100644
+--- a/src/d3d11/meson.build
++++ b/src/d3d11/meson.build
+@@ -86,6 +86,7 @@ d3d11_dll = shared_library('d3d11'+dll_ext, dxgi_common_src + d3d11_src + d3d10_
+   vs_module_defs      : 'd3d11'+def_spec_ext,
+   link_args           : d3d11_ld_args,
+   link_depends        : [ d3d11_link_depends ],
++  cpp_pch             : '../pch/d3d11_pch.h',
+ )
+ 
+ d3d11_dep = declare_dependency(
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index dd6b2316..dc2aa1fb 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -65,6 +65,7 @@ d3d9_dll = shared_library('d3d9'+dll_ext, d3d9_src, glsl_generator.process(d3d9_
+   vs_module_defs      : 'd3d9'+def_spec_ext,
+   link_args           : d3d9_ld_args,
+   link_depends        : [ d3d9_link_depends ],
++  cpp_pch             : '../pch/d3d9_pch.h',
+ )
+ 
+ d3d9_dep = declare_dependency(
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index fa174987..73fc4c71 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -144,6 +144,7 @@ dxvk_lib = static_library('dxvk', dxvk_src, glsl_generator.process(dxvk_shaders)
+   link_with           : [ util_lib, spirv_lib, wsi_lib ],
+   dependencies        : [ vkcommon_dep ] + dxvk_extra_deps,
+   include_directories : [ dxvk_include_path ],
++  cpp_pch             : '../pch/dxvk_pch.h',
+ )
+ 
+ dxvk_dep = declare_dependency(
+diff --git a/src/pch/d3d11_pch.h b/src/pch/d3d11_pch.h
+new file mode 100644
+index 00000000..0989dd0d
+--- /dev/null
++++ b/src/pch/d3d11_pch.h
+@@ -0,0 +1,9 @@
++#include "../dxvk/dxvk_adapter.h"
++#include "../dxvk/dxvk_buffer.h"
++#include "../dxvk/dxvk_device.h"
++#include "d3d11_context.h"
++#include "d3d11_device.h"
++#include "../util/util_string.h"
++#include "../util/util_env.h"
++#include "../util/log/log.h"
++#include "../util/thread.h"
+\ No newline at end of file
+diff --git a/src/pch/d3d9_pch.h b/src/pch/d3d9_pch.h
+new file mode 100644
+index 00000000..1d9e06b2
+--- /dev/null
++++ b/src/pch/d3d9_pch.h
+@@ -0,0 +1,7 @@
++#include "../dxvk/dxvk_adapter.h"
++#include "../dxvk/dxvk_buffer.h"
++#include "../dxvk/dxvk_device.h"
++#include "../util/util_string.h"
++#include "../util/util_env.h"
++#include "../util/log/log.h"
++#include "../util/thread.h"
+\ No newline at end of file
+diff --git a/src/pch/dxvk_pch.h b/src/pch/dxvk_pch.h
+new file mode 100644
+index 00000000..081d583b
+--- /dev/null
++++ b/src/pch/dxvk_pch.h
+@@ -0,0 +1,7 @@
++#include "dxvk_adapter.h"
++#include "dxvk_buffer.h"
++#include "dxvk_device.h"
++#include "../util/util_string.h"
++#include "../util/util_env.h"
++#include "../util/log/log.h"
++#include "../util/thread.h"
+\ No newline at end of file
+-- 
+2.43.0
+
+
+From 295c0120f1f12e797dc11837b3421121ceb817b6 Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Mon, 2 Jan 2023 22:34:42 +0900
+Subject: [PATCH 06/12] Frame wrapper conversion, add implicit frame support
+
+---
+ src/d3d11/d3d11_context_ext.cpp |  27 +++-----
+ src/d3d11/d3d11_context_ext.h   |   2 -
+ src/d3d11/d3d11_context_imm.cpp |   1 +
+ src/d3d11/d3d11_context_imm.h   |   2 +
+ src/d3d11/d3d11_device.cpp      |   9 +--
+ src/d3d11/d3d11_device.h        |   6 +-
+ src/d3d11/d3d11_interfaces.h    |   9 +++
+ src/d3d11/d3d11_swapchain.cpp   |   1 +
+ src/dxvk/dxvk_cmdlist.h         |   4 +-
+ src/dxvk/dxvk_context.cpp       |  35 +++++++++-
+ src/dxvk/dxvk_context.h         |   7 +-
+ src/dxvk/dxvk_cs.cpp            |   2 +-
+ src/dxvk/dxvk_device.cpp        |   5 ++
+ src/dxvk/dxvk_device.h          |   7 +-
+ src/dxvk/dxvk_gpu_query.cpp     |   2 +-
+ src/dxvk/dxvk_lfx2.cpp          | 109 +++++++++++++++++++++++++++++---
+ src/dxvk/dxvk_lfx2.h            |  44 +++++++++++--
+ 17 files changed, 223 insertions(+), 49 deletions(-)
+
+diff --git a/src/d3d11/d3d11_context_ext.cpp b/src/d3d11/d3d11_context_ext.cpp
+index cd1a7d1d..3e33f2dc 100644
+--- a/src/d3d11/d3d11_context_ext.cpp
++++ b/src/d3d11/d3d11_context_ext.cpp
+@@ -218,13 +218,13 @@ namespace dxvk {
+   template<typename ContextType>
+   bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::MarkRenderStartLFX2(void *frame) {
+     auto query = m_ctx->m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
++    auto frameWrapper = Lfx2Frame(m_ctx->m_device->lfx2(), static_cast<lfx2Frame *>(frame));
+ 
+-    m_ctx->m_device->lfx2().FrameAddRef(static_cast<lfx2Frame *>(frame));
+-    m_ctx->EmitCs([query, frame, cDevice = m_ctx->m_device] (DxvkContext* ctx) {
++    m_ctx->EmitCs([query, cDevice = m_ctx->m_device, frameWrapper] (DxvkContext* ctx) {
+       auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.MarkSection(static_cast<lfx2Frame *>(frame), 800, lfx2MarkType::lfx2MarkTypeBegin, cLfx2.TimestampNow());
++      cLfx2.MarkSection(frameWrapper, 800, lfx2MarkType::lfx2MarkTypeBegin, cLfx2.TimestampNow());
+       ctx->writeTimestamp(query);
+-      ctx->trackLatencyMarker(frame, query, false);
++      ctx->trackLatencyMarker(frameWrapper, query, false);
+     });
+     return true;
+   }
+@@ -232,28 +232,17 @@ namespace dxvk {
+   template<typename ContextType>
+   bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::MarkRenderEndLFX2(void *frame) {
+     auto query = m_ctx->m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
++    auto frameWrapper = Lfx2Frame(m_ctx->m_device->lfx2(), static_cast<lfx2Frame *>(frame));
+ 
+-    m_ctx->m_device->lfx2().FrameAddRef(static_cast<lfx2Frame *>(frame));
+-    m_ctx->EmitCs([query, frame, cDevice = m_ctx->m_device] (DxvkContext* ctx) {
++    m_ctx->EmitCs([query, cDevice = m_ctx->m_device, frameWrapper] (DxvkContext* ctx) {
+       auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.MarkSection(static_cast<lfx2Frame *>(frame), 800, lfx2MarkType::lfx2MarkTypeEnd, cLfx2.TimestampNow());
++      cLfx2.MarkSection(frameWrapper, 800, lfx2MarkType::lfx2MarkTypeEnd, cLfx2.TimestampNow());
+       ctx->writeTimestamp(query);
+-      ctx->trackLatencyMarker(frame, query, true);
++      ctx->trackLatencyMarker(frameWrapper, query, true);
+     });
+     return true;
+   }
+ 
+-  template<typename ContextType>
+-  bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::SleepAndBeginFrameLFX2() {
+-    Logger::err("SleepAndBeginFrameLFX2 should be only called on an immediate context");
+-    return false;
+-  }
+-
+-  template<>
+-  bool STDMETHODCALLTYPE D3D11DeviceContextExt<D3D11ImmediateContext>::SleepAndBeginFrameLFX2() {
+-    return true;
+-  }
+-
+   template class D3D11DeviceContextExt<D3D11DeferredContext>;
+   template class D3D11DeviceContextExt<D3D11ImmediateContext>;
+ 
+diff --git a/src/d3d11/d3d11_context_ext.h b/src/d3d11/d3d11_context_ext.h
+index e9951d27..3b17d1f5 100644
+--- a/src/d3d11/d3d11_context_ext.h
++++ b/src/d3d11/d3d11_context_ext.h
+@@ -75,8 +75,6 @@ namespace dxvk {
+ 
+     bool STDMETHODCALLTYPE MarkRenderEndLFX2(void *lfx2Frame);
+ 
+-    bool STDMETHODCALLTYPE SleepAndBeginFrameLFX2();
+-
+   private:
+     
+     ContextType* m_ctx;
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index 466e9a96..32e3eb78 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -842,6 +842,7 @@ namespace dxvk {
+     D3D10DeviceLock lock = LockContext();
+ 
+     EmitCs<false>([] (DxvkContext* ctx) {
++      ctx->endLfx2Frame();
+       ctx->endFrame();
+     });
+   }
+diff --git a/src/d3d11/d3d11_context_imm.h b/src/d3d11/d3d11_context_imm.h
+index 3e683250..ffd2c703 100644
+--- a/src/d3d11/d3d11_context_imm.h
++++ b/src/d3d11/d3d11_context_imm.h
+@@ -182,6 +182,8 @@ namespace dxvk {
+             HANDLE                      hEvent,
+             BOOL                        Synchronize);
+ 
++  private:
++    Lfx2Frame m_implicitLfx2Frame {};
+   };
+   
+ }
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 078dcb4b..0353109d 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -2784,10 +2784,10 @@ namespace dxvk {
+     return static_cast<ID3D11ShaderResourceView*>(got->second);
+   }
+ 
++  void D3D11DeviceExt::EnqueueImplicitFrameLFX2(void *frame) {
++    m_device->GetDXVKDevice()->getImplicitLfx2Context()->EnqueueFrame(Lfx2Frame(m_device->GetDXVKDevice()->lfx2(), reinterpret_cast<lfx2Frame *>(frame)));
++  }
+ 
+-
+-  
+-  
+   D3D11VideoDevice::D3D11VideoDevice(
+           D3D11DXGIDevice*        pContainer,
+           D3D11Device*            pDevice)
+@@ -3141,7 +3141,8 @@ namespace dxvk {
+     }
+     
+     if (riid == __uuidof(ID3D11VkExtDevice)
+-     || riid == __uuidof(ID3D11VkExtDevice1)) {
++     || riid == __uuidof(ID3D11VkExtDevice1)
++     || riid == __uuidof(ID3D11VkExtDevice2)) {
+       *ppvObject = ref(&m_d3d11DeviceExt);
+       return S_OK;
+     }
+diff --git a/src/d3d11/d3d11_device.h b/src/d3d11/d3d11_device.h
+index 7a44b5ad..129353be 100644
+--- a/src/d3d11/d3d11_device.h
++++ b/src/d3d11/d3d11_device.h
+@@ -507,7 +507,7 @@ namespace dxvk {
+   /**
+    * \brief Extended D3D11 device
+    */
+-  class D3D11DeviceExt : public ID3D11VkExtDevice1 {
++  class D3D11DeviceExt : public ID3D11VkExtDevice2 {
+     
+   public:
+     
+@@ -561,7 +561,9 @@ namespace dxvk {
+             const D3D11_SAMPLER_DESC* pSamplerDesc,
+             ID3D11SamplerState**      ppSamplerState,
+             uint32_t*                 pDriverHandle);
+-    
++
++    void STDMETHODCALLTYPE EnqueueImplicitFrameLFX2(void *lfx2Frame) override;
++
+   private:
+     
+     D3D11DXGIDevice* m_container;
+diff --git a/src/d3d11/d3d11_interfaces.h b/src/d3d11/d3d11_interfaces.h
+index 1e1071d1..813fb1bf 100644
+--- a/src/d3d11/d3d11_interfaces.h
++++ b/src/d3d11/d3d11_interfaces.h
+@@ -115,6 +115,13 @@ ID3D11VkExtDevice1 : public ID3D11VkExtDevice {
+           uint32_t*               pCudaTextureHandle) = 0;
+ };
+ 
++MIDL_INTERFACE("a1a5185c-0c43-4608-91a0-97a0cd098d48")
++ID3D11VkExtDevice2 : public ID3D11VkExtDevice1 {
++
++  virtual void STDMETHODCALLTYPE EnqueueImplicitFrameLFX2(void *lfx2Frame) = 0;
++
++};
++
+ 
+ /**
+  * \brief Extended D3D11 context
+@@ -199,6 +206,7 @@ ID3D11VkExtContext2 : public ID3D11VkExtContext1 {
+ struct __declspec(uuid("bb8a4fb9-3935-4762-b44b-35189a26414a")) ID3D11VkExtShader;
+ struct __declspec(uuid("8a6e3c42-f74c-45b7-8265-a231b677ca17")) ID3D11VkExtDevice;
+ struct __declspec(uuid("cfcf64ef-9586-46d0-bca4-97cf2ca61b06")) ID3D11VkExtDevice1;
++struct __declspec(uuid("a1a5185c-0c43-4608-91a0-97a0cd098d48")) ID3D11VkExtDevice2;
+ struct __declspec(uuid("fd0bca13-5cb6-4c3a-987e-4750de2ca791")) ID3D11VkExtContext;
+ struct __declspec(uuid("874b09b2-ae0b-41d8-8476-5f3b7a0e879d")) ID3D11VkExtContext1;
+ struct __declspec(uuid("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")) ID3D11VkExtContext2;
+@@ -206,6 +214,7 @@ struct __declspec(uuid("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")) ID3D11VkExtConte
+ __CRT_UUID_DECL(ID3D11VkExtShader,         0xbb8a4fb9,0x3935,0x4762,0xb4,0x4b,0x35,0x18,0x9a,0x26,0x41,0x4a);
+ __CRT_UUID_DECL(ID3D11VkExtDevice,         0x8a6e3c42,0xf74c,0x45b7,0x82,0x65,0xa2,0x31,0xb6,0x77,0xca,0x17);
+ __CRT_UUID_DECL(ID3D11VkExtDevice1,        0xcfcf64ef,0x9586,0x46d0,0xbc,0xa4,0x97,0xcf,0x2c,0xa6,0x1b,0x06);
++__CRT_UUID_DECL(ID3D11VkExtDevice2,        0xa1a5185c,0x0c43,0x4608,0x91,0xa0,0x97,0xa0,0xcd,0x09,0x8d,0x48);
+ __CRT_UUID_DECL(ID3D11VkExtContext,        0xfd0bca13,0x5cb6,0x4c3a,0x98,0x7e,0x47,0x50,0xde,0x2c,0xa7,0x91);
+ __CRT_UUID_DECL(ID3D11VkExtContext1,       0x874b09b2,0xae0b,0x41d8,0x84,0x76,0x5f,0x3b,0x7a,0x0e,0x87,0x9d);
+ __CRT_UUID_DECL(ID3D11VkExtContext2,       0x6e65f21a,0x0ecd,0x4e76,0x8f,0xaf,0x9e,0x9a,0xfa,0x40,0x93,0xa4);
+diff --git a/src/d3d11/d3d11_swapchain.cpp b/src/d3d11/d3d11_swapchain.cpp
+index 0e823f41..0f2610c7 100644
+--- a/src/d3d11/d3d11_swapchain.cpp
++++ b/src/d3d11/d3d11_swapchain.cpp
+@@ -455,6 +455,7 @@ namespace dxvk {
+     // Ensure that we can safely destroy the swap chain
+     m_device->waitForSubmission(&m_presentStatus);
+     m_device->waitForIdle();
++    m_device->getImplicitLfx2Context()->Reset();
+ 
+     m_presentStatus.result = VK_SUCCESS;
+     m_dirtyHdrMetadata = true;
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+index 7defe86d..471ed65a 100644
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -321,8 +321,8 @@ namespace dxvk {
+       m_signalTracker.add(signal, value);
+     }
+ 
+-    void trackLatencyMarker(void *lfx2Frame, Rc<DxvkGpuQuery> timestampQuery, bool end) {
+-      m_lfx2Tracker.add(lfx2Frame, std::move(timestampQuery), end);
++    void trackLatencyMarker(Lfx2Frame lfx2Frame, Rc<DxvkGpuQuery> timestampQuery, bool end) {
++      m_lfx2Tracker.add(std::move(lfx2Frame), std::move(timestampQuery), end);
+     }
+ 
+     /**
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 89decd8c..58771683 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -6444,8 +6444,39 @@ namespace dxvk {
+     this->beginCurrentCommands();
+   }
+ 
+-  void DxvkContext::trackLatencyMarker(void *frame, Rc<DxvkGpuQuery> timestampQuery, bool end) {
+-    m_cmd->trackLatencyMarker(frame, std::move(timestampQuery), end);
++  void DxvkContext::trackLatencyMarker(Lfx2Frame frame, Rc<DxvkGpuQuery> timestampQuery, bool end) {
++    m_cmd->trackLatencyMarker(std::move(frame), std::move(timestampQuery), end);
++  }
++
++  void DxvkContext::tryBeginLfx2Frame(bool critical) {
++    if (m_type != DxvkContextType::Primary)
++      Logger::err("beginLfx2Frame should only be called on immediate contexts");
++    if (!m_lfx2Frame) {
++      m_lfx2Frame = m_device->getImplicitLfx2Context()->DequeueFrame(critical);
++      if (m_lfx2Frame) {
++        auto query = m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
++        m_device->lfx2().MarkSection(m_lfx2Frame,
++                                     800, lfx2MarkType::lfx2MarkTypeBegin,
++                                     m_device->lfx2().TimestampNow());
++        writeTimestamp(query);
++        trackLatencyMarker(m_lfx2Frame, query, false);
++      }
++    }
++  }
++
++  void DxvkContext::endLfx2Frame() {
++    if (m_type != DxvkContextType::Primary)
++      Logger::err("endLfx2Frame should only be called on immediate contexts");
++    tryBeginLfx2Frame(true);
++    if (m_lfx2Frame) {
++      auto query = m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
++      m_device->lfx2().MarkSection(m_lfx2Frame,
++                                   800, lfx2MarkType::lfx2MarkTypeEnd,
++                                   m_device->lfx2().TimestampNow());
++      writeTimestamp(query);
++      trackLatencyMarker(m_lfx2Frame, query, true);
++      m_lfx2Frame = {};
++    }
+   }
+ 
+ }
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 1572e40f..58970f4f 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -67,6 +67,9 @@ namespace dxvk {
+      * \param [out] status Submission feedback
+      */
+     void flushCommandList(DxvkSubmitStatus* status);
++
++    void tryBeginLfx2Frame(bool critical);
++    void endLfx2Frame();
+     
+     /**
+      * \brief Begins generating query data
+@@ -1388,7 +1391,7 @@ namespace dxvk {
+         m_cmd->addStatCtr(counter, value);
+     }
+ 
+-    void trackLatencyMarker(void *frame, Rc<DxvkGpuQuery> timestampQuery, bool end);
++    void trackLatencyMarker(Lfx2Frame frame, Rc<DxvkGpuQuery> timestampQuery, bool end);
+ 
+   private:
+     
+@@ -1434,6 +1437,8 @@ namespace dxvk {
+     std::array<DxvkGraphicsPipeline*, 4096> m_gpLookupCache = { };
+     std::array<DxvkComputePipeline*,   256> m_cpLookupCache = { };
+ 
++    Lfx2Frame m_lfx2Frame = {};
++
+     void blitImageFb(
+       const Rc<DxvkImage>&        dstImage,
+       const Rc<DxvkImage>&        srcImage,
+diff --git a/src/dxvk/dxvk_cs.cpp b/src/dxvk/dxvk_cs.cpp
+index 5788ba82..fe1f4c3a 100644
+--- a/src/dxvk/dxvk_cs.cpp
++++ b/src/dxvk/dxvk_cs.cpp
+@@ -175,7 +175,7 @@ namespace dxvk {
+ 
+         for (auto& chunk : chunks) {
+           m_context->addStatCtr(DxvkStatCounter::CsChunkCount, 1);
+-
++          m_context->tryBeginLfx2Frame(false);
+           chunk->executeAll(m_context.ptr());
+ 
+           // Use a separate mutex for the chunk counter, this
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index 9a053791..d133930f 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -14,6 +14,7 @@ namespace dxvk {
+     m_instance          (instance),
+     m_adapter           (adapter),
+     m_vkd               (vkd),
++    m_lfx2ImplicitContext(&m_lfx2),
+     m_features          (features),
+     m_properties        (adapter->devicePropertiesExt()),
+     m_perfHints         (getPerfHints()),
+@@ -339,4 +340,8 @@ namespace dxvk {
+     m_recycledCommandLists.returnObject(cmdList);
+   }
+   
++  DxvkLfx2ImplicitContext *DxvkDevice::getImplicitLfx2Context() {
++    return &m_lfx2ImplicitContext;
++  }
++  
+ }
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+index 5b3a1f04..7fa12dc5 100644
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -99,7 +99,7 @@ namespace dxvk {
+       return m_vkd;
+     }
+ 
+-    const DxvkLfx2 &lfx2() const {
++    const Lfx2Fn &lfx2() const {
+       return m_lfx2;
+     }
+     
+@@ -538,6 +538,8 @@ namespace dxvk {
+      * used by the GPU can be safely destroyed.
+      */
+     void waitForIdle();
++
++    DxvkLfx2ImplicitContext* getImplicitLfx2Context();
+     
+   private:
+     
+@@ -546,7 +548,8 @@ namespace dxvk {
+     Rc<DxvkInstance>            m_instance;
+     Rc<DxvkAdapter>             m_adapter;
+     Rc<vk::DeviceFn>            m_vkd;
+-    DxvkLfx2                    m_lfx2;
++    Lfx2Fn                      m_lfx2;
++    DxvkLfx2ImplicitContext     m_lfx2ImplicitContext;
+ 
+     DxvkDeviceFeatures          m_features;
+     DxvkDeviceInfo              m_properties;
+diff --git a/src/dxvk/dxvk_gpu_query.cpp b/src/dxvk/dxvk_gpu_query.cpp
+index aaec6a0f..5f4885f0 100644
+--- a/src/dxvk/dxvk_gpu_query.cpp
++++ b/src/dxvk/dxvk_gpu_query.cpp
+@@ -340,7 +340,7 @@ namespace dxvk {
+       handle.queryId);
+     
+     cmd->cmdWriteTimestamp(
+-      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+       handle.queryPool,
+       handle.queryId);
+     
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+index f56bcb51..aa844668 100644
+--- a/src/dxvk/dxvk_lfx2.cpp
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -1,12 +1,14 @@
+ #include "dxvk_lfx2.h"
+ 
++#include <utility>
++
+ #include "../util/util_time.h"
+ #include "dxvk_device.h"
+ #include "../util/util_win32_compat.h"
+ 
+ namespace dxvk {
+ 
+-  DxvkLfx2::DxvkLfx2() {
++  Lfx2Fn::Lfx2Fn() {
+ #ifdef _WIN32
+     const auto lfxModuleName = "latencyflex2_rust.dll";
+ #else
+@@ -38,7 +40,7 @@ namespace dxvk {
+ #undef LOAD_PFN
+   }
+ 
+-  DxvkLfx2::~DxvkLfx2() {
++  Lfx2Fn::~Lfx2Fn() {
+     if (m_lfxModule == nullptr)
+       return;
+ 
+@@ -47,16 +49,16 @@ namespace dxvk {
+   }
+ 
+   template<typename T>
+-  T DxvkLfx2::GetProcAddress(const char *name) {
++  T Lfx2Fn::GetProcAddress(const char *name) {
+     return reinterpret_cast<T>(reinterpret_cast<void *>(::GetProcAddress(m_lfxModule, name)));
+   }
+ 
+   DxvkLfx2Tracker::DxvkLfx2Tracker(DxvkDevice *device) : m_device(device) {
+   }
+ 
+-  void DxvkLfx2Tracker::add(void *lfx2Frame, Rc<DxvkGpuQuery> query, bool end) {
++  void DxvkLfx2Tracker::add(Lfx2Frame lfx2Frame, Rc<DxvkGpuQuery> query, bool end) {
+     m_query[end] = std::move(query);
+-    m_frame_handle[end] = lfx2Frame;
++    m_frame_handle[end] = std::move(lfx2Frame);
+   }
+ 
+   void DxvkLfx2Tracker::notify() {
+@@ -94,10 +96,9 @@ namespace dxvk {
+           int64_t timestamp = hostNsTimestamp + (int64_t) (gpuTimestampDelta *
+                                                            (double) m_device->adapter()->deviceProperties().limits.timestampPeriod);
+ 
+-          m_device->lfx2().MarkSection(static_cast<lfx2Frame *>(m_frame_handle[i]),
++          m_device->lfx2().MarkSection(m_frame_handle[i],
+                                        1000, i == 0 ? lfx2MarkType::lfx2MarkTypeBegin : lfx2MarkType::lfx2MarkTypeEnd,
+                                        timestamp);
+-          m_device->lfx2().FrameRelease(static_cast<lfx2Frame *>(m_frame_handle[i]));
+         }
+       }
+     }
+@@ -108,8 +109,100 @@ namespace dxvk {
+       i = nullptr;
+     }
+     for (auto &i: m_frame_handle) {
+-      i = nullptr;
++      i = {};
++    }
++  }
++
++  DxvkLfx2ImplicitContext::DxvkLfx2ImplicitContext(Lfx2Fn *lfx2): m_lfx2(lfx2) {
++  }
++
++  DxvkLfx2ImplicitContext::~DxvkLfx2ImplicitContext() {
++    std::lock_guard<std::mutex> lock(m_mutex);
++    m_frames.clear();
++  }
++
++  void DxvkLfx2ImplicitContext::EnqueueFrame(Lfx2Frame frame) {
++    std::unique_lock<std::mutex> lock(m_mutex, std::defer_lock);
++    if (m_needReset.load()) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(200));
++      lock.lock();
++      Logger::info("Reset LFX2 context done");
++      m_needReset.store(false);
++      m_frames.clear();
++    } else {
++      lock.lock();
++    }
++    m_frames.push_back(std::move(frame));
++    if (m_frames.size() >= 16) {
++      Logger::info("Resetting LFX2 context: too many inflight frames");
++      m_needReset.store(true);
+     }
+   }
+ 
++  Lfx2Frame DxvkLfx2ImplicitContext::DequeueFrame(bool critical) {
++    if (m_needReset.load()) {
++      return {};
++    }
++    std::lock_guard<std::mutex> lock(m_mutex);
++    if (m_frames.empty()) {
++      if (critical) {
++        Logger::info("Resetting LFX2 context: no frames");
++        m_needReset.store(true);
++      }
++      return {};
++    }
++    Lfx2Frame frame = std::move(m_frames.front());
++    m_frames.pop_front();
++    return frame;
++  }
++
++  void DxvkLfx2ImplicitContext::Reset() {
++    std::lock_guard<std::mutex> lock(m_mutex);
++    Logger::info("Resetting LFX2 context: initiated by swapchain");
++    m_needReset.store(true);
++  }
++
++  Lfx2Frame::Lfx2Frame() {
++
++  }
++
++  Lfx2Frame::Lfx2Frame(const Lfx2Fn &lfx2, lfx2Frame *lfx2Frame) : m_lfx2(&lfx2), m_lfx2Frame(lfx2Frame) {
++    m_lfx2->FrameAddRef(m_lfx2Frame);
++  }
++
++  Lfx2Frame::~Lfx2Frame() {
++    if (m_lfx2Frame != nullptr)
++      m_lfx2->FrameRelease(m_lfx2Frame);
++  }
++
++  Lfx2Frame::Lfx2Frame(const Lfx2Frame &other): m_lfx2(other.m_lfx2), m_lfx2Frame(other.m_lfx2Frame) {
++    m_lfx2->FrameAddRef(m_lfx2Frame);
++  }
++
++  Lfx2Frame::Lfx2Frame(Lfx2Frame &&other) noexcept : m_lfx2(other.m_lfx2), m_lfx2Frame(other.m_lfx2Frame) {
++    other.m_lfx2Frame = nullptr;
++  }
++
++  Lfx2Frame &Lfx2Frame::operator=(const Lfx2Frame &other) {
++    if (this != &other) {
++      if (m_lfx2Frame != nullptr)
++        m_lfx2->FrameRelease(m_lfx2Frame);
++
++      m_lfx2 = other.m_lfx2;
++      m_lfx2Frame = other.m_lfx2Frame;
++      m_lfx2->FrameAddRef(m_lfx2Frame);
++    }
++
++    return *this;
++  }
++
++  Lfx2Frame &Lfx2Frame::operator=(Lfx2Frame &&other) noexcept {
++    if (m_lfx2Frame != nullptr)
++      m_lfx2->FrameRelease(m_lfx2Frame);
++
++    m_lfx2 = other.m_lfx2;
++    m_lfx2Frame = other.m_lfx2Frame;
++    other.m_lfx2Frame = nullptr;
++    return *this;
++  }
+ } // dxvk
+\ No newline at end of file
+diff --git a/src/dxvk/dxvk_lfx2.h b/src/dxvk/dxvk_lfx2.h
+index 1f5c5b5f..809234dc 100644
+--- a/src/dxvk/dxvk_lfx2.h
++++ b/src/dxvk/dxvk_lfx2.h
+@@ -1,14 +1,15 @@
+ #pragma once
+ 
++#include <deque>
+ #include "dxvk_gpu_query.h"
+ #include "latencyflex2.h"
+ 
+ namespace dxvk {
+ 
+-  class DxvkLfx2 {
++  class Lfx2Fn {
+   public:
+-    DxvkLfx2();
+-    virtual ~DxvkLfx2();
++    Lfx2Fn();
++    virtual ~Lfx2Fn();
+ 
+ #define DECLARE_PFN(x) \
+     decltype(&::lfx2##x) x {}
+@@ -35,17 +36,50 @@ namespace dxvk {
+     HMODULE m_lfxModule{};
+   };
+ 
++  class Lfx2Frame {
++  public:
++    Lfx2Frame();
++    Lfx2Frame(const Lfx2Fn &lfx2, lfx2Frame *lfx2Frame);
++    Lfx2Frame(const Lfx2Frame &other);
++    Lfx2Frame(Lfx2Frame &&other) noexcept;
++    ~Lfx2Frame();
++
++    Lfx2Frame& operator=(const Lfx2Frame &other);
++    Lfx2Frame& operator=(Lfx2Frame &&other) noexcept;
++
++    operator lfx2Frame *() const { return m_lfx2Frame; }
++
++  private:
++    const Lfx2Fn *m_lfx2{};
++    lfx2Frame *m_lfx2Frame{};
++  };
++
++  class DxvkLfx2ImplicitContext {
++  public:
++    explicit DxvkLfx2ImplicitContext(Lfx2Fn *lfx2);
++    ~DxvkLfx2ImplicitContext();
++    void EnqueueFrame(Lfx2Frame frame);
++    Lfx2Frame DequeueFrame(bool critical);
++    void Reset();
++
++  private:
++    Lfx2Fn *m_lfx2;
++    std::mutex m_mutex;
++    std::deque<Lfx2Frame> m_frames;
++    std::atomic_bool m_needReset = false;
++  };
++
+   class DxvkLfx2Tracker {
+   public:
+     explicit DxvkLfx2Tracker(DxvkDevice *device);
+-    void add(void *lfx2Frame, Rc<DxvkGpuQuery> query, bool end);
++    void add(Lfx2Frame frame, Rc<DxvkGpuQuery> query, bool end);
+     void reset();
+     void notify();
+ 
+   private:
+     DxvkDevice *m_device;
+     Rc<DxvkGpuQuery> m_query[2]{};
+-    void *m_frame_handle[2]{};
++    Lfx2Frame m_frame_handle[2]{};
+   };
+ 
+ } // dxvk
+\ No newline at end of file
+-- 
+2.43.0
+
+
+From 1852e8adae12ee1a6f6deceaf2b942d433a7320f Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Sat, 7 Jan 2023 12:58:36 +0900
+Subject: [PATCH 07/12] Update to new LFX2 implicit context API
+
+---
+ include/latencyflex2.h        | 68 +++++++++++++++++++++++------------
+ src/d3d11/d3d11_device.cpp    |  4 +--
+ src/d3d11/d3d11_device.h      |  2 +-
+ src/d3d11/d3d11_interfaces.h  |  2 +-
+ src/d3d11/d3d11_swapchain.cpp |  2 +-
+ src/dxvk/dxvk_context.cpp     |  2 +-
+ src/dxvk/dxvk_lfx2.cpp        | 57 +++++++++--------------------
+ src/dxvk/dxvk_lfx2.h          | 15 ++++----
+ 8 files changed, 77 insertions(+), 75 deletions(-)
+
+diff --git a/include/latencyflex2.h b/include/latencyflex2.h
+index 6978e2af..9de7a1cf 100644
+--- a/include/latencyflex2.h
++++ b/include/latencyflex2.h
+@@ -1,12 +1,11 @@
+ #ifndef LATENCYFLEX2_H
+ #define LATENCYFLEX2_H
+ 
+-#include <cstdarg>
+-#include <cstddef>
+-#include <cstdint>
+-#include <cstdlib>
+-#include <ostream>
+-#include <new>
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdlib.h>
+ #ifdef _WIN32
+ #define LFX2_API __declspec(dllimport)
+ #else
+@@ -14,24 +13,29 @@
+ #endif
+ 
+ 
+-enum class lfx2MarkType {
++typedef enum lfx2MarkType {
+   lfx2MarkTypeBegin,
+   lfx2MarkTypeEnd,
+-};
++} lfx2MarkType;
+ 
+-struct lfx2Context;
++typedef struct lfx2Context lfx2Context;
+ 
+-/// A write handle for frame markers.
+-struct lfx2Frame;
++/**
++ * A write handle for frame markers.
++ */
++typedef struct lfx2Frame lfx2Frame;
+ 
+-using lfx2Timestamp = uint64_t;
++typedef struct lfx2ImplicitContext lfx2ImplicitContext;
+ 
+-using lfx2SectionId = uint32_t;
++typedef uint64_t lfx2Timestamp;
+ 
++typedef uint32_t lfx2SectionId;
+ 
++#ifdef __cplusplus
+ extern "C" {
++#endif // __cplusplus
+ 
+-LFX2_API lfx2Timestamp lfx2TimestampNow();
++LFX2_API lfx2Timestamp lfx2TimestampNow(void);
+ 
+ #if defined(_WIN32)
+ LFX2_API lfx2Timestamp lfx2TimestampFromQpc(uint64_t qpc);
+@@ -39,24 +43,42 @@ LFX2_API lfx2Timestamp lfx2TimestampFromQpc(uint64_t qpc);
+ 
+ LFX2_API void lfx2SleepUntil(lfx2Timestamp target);
+ 
+-LFX2_API lfx2Context *lfx2ContextCreate();
++LFX2_API struct lfx2Context *lfx2ContextCreate(void);
+ 
+-LFX2_API void lfx2ContextAddRef(lfx2Context *context);
++LFX2_API void lfx2ContextAddRef(struct lfx2Context *context);
+ 
+-LFX2_API void lfx2ContextRelease(lfx2Context *context);
++LFX2_API void lfx2ContextRelease(struct lfx2Context *context);
+ 
+-LFX2_API lfx2Frame *lfx2FrameCreate(lfx2Context *context, lfx2Timestamp *out_timestamp);
++LFX2_API
++struct lfx2Frame *lfx2FrameCreate(struct lfx2Context *context,
++                                  lfx2Timestamp *out_timestamp);
+ 
+-LFX2_API void lfx2FrameAddRef(lfx2Frame *frame);
++LFX2_API void lfx2FrameAddRef(struct lfx2Frame *frame);
+ 
+-LFX2_API void lfx2FrameRelease(lfx2Frame *frame);
++LFX2_API void lfx2FrameRelease(struct lfx2Frame *frame);
+ 
+ LFX2_API
+-void lfx2MarkSection(lfx2Frame *frame,
++void lfx2MarkSection(struct lfx2Frame *frame,
+                      lfx2SectionId section_id,
+-                     lfx2MarkType mark_type,
++                     enum lfx2MarkType mark_type,
+                      lfx2Timestamp timestamp);
+ 
++LFX2_API struct lfx2ImplicitContext *lfx2ImplicitContextCreate(void);
++
++LFX2_API void lfx2ImplicitContextRelease(struct lfx2ImplicitContext *context);
++
++LFX2_API void lfx2ImplicitContextReset(struct lfx2ImplicitContext *context);
++
++LFX2_API
++void lfx2FrameCreateImplicit(struct lfx2ImplicitContext *context,
++                             lfx2Timestamp *out_timestamp);
++
++LFX2_API
++struct lfx2Frame *lfx2FrameDequeueImplicit(struct lfx2ImplicitContext *context,
++                                           bool critical);
++
++#ifdef __cplusplus
+ } // extern "C"
++#endif // __cplusplus
+ 
+-#endif // LATENCYFLEX2_H
++#endif /* LATENCYFLEX2_H */
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 0353109d..0bee3d3d 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -2784,8 +2784,8 @@ namespace dxvk {
+     return static_cast<ID3D11ShaderResourceView*>(got->second);
+   }
+ 
+-  void D3D11DeviceExt::EnqueueImplicitFrameLFX2(void *frame) {
+-    m_device->GetDXVKDevice()->getImplicitLfx2Context()->EnqueueFrame(Lfx2Frame(m_device->GetDXVKDevice()->lfx2(), reinterpret_cast<lfx2Frame *>(frame)));
++  void *D3D11DeviceExt::GetImplicitContextLFX2() {
++    return m_device->GetDXVKDevice()->getImplicitLfx2Context()->context();
+   }
+ 
+   D3D11VideoDevice::D3D11VideoDevice(
+diff --git a/src/d3d11/d3d11_device.h b/src/d3d11/d3d11_device.h
+index 129353be..ab4763ed 100644
+--- a/src/d3d11/d3d11_device.h
++++ b/src/d3d11/d3d11_device.h
+@@ -562,7 +562,7 @@ namespace dxvk {
+             ID3D11SamplerState**      ppSamplerState,
+             uint32_t*                 pDriverHandle);
+ 
+-    void STDMETHODCALLTYPE EnqueueImplicitFrameLFX2(void *lfx2Frame) override;
++    void* STDMETHODCALLTYPE GetImplicitContextLFX2();
+ 
+   private:
+     
+diff --git a/src/d3d11/d3d11_interfaces.h b/src/d3d11/d3d11_interfaces.h
+index 813fb1bf..08a99cff 100644
+--- a/src/d3d11/d3d11_interfaces.h
++++ b/src/d3d11/d3d11_interfaces.h
+@@ -118,7 +118,7 @@ ID3D11VkExtDevice1 : public ID3D11VkExtDevice {
+ MIDL_INTERFACE("a1a5185c-0c43-4608-91a0-97a0cd098d48")
+ ID3D11VkExtDevice2 : public ID3D11VkExtDevice1 {
+ 
+-  virtual void STDMETHODCALLTYPE EnqueueImplicitFrameLFX2(void *lfx2Frame) = 0;
++  virtual void* STDMETHODCALLTYPE GetImplicitContextLFX2() = 0;
+ 
+ };
+ 
+diff --git a/src/d3d11/d3d11_swapchain.cpp b/src/d3d11/d3d11_swapchain.cpp
+index 0f2610c7..7ef7cffd 100644
+--- a/src/d3d11/d3d11_swapchain.cpp
++++ b/src/d3d11/d3d11_swapchain.cpp
+@@ -455,7 +455,7 @@ namespace dxvk {
+     // Ensure that we can safely destroy the swap chain
+     m_device->waitForSubmission(&m_presentStatus);
+     m_device->waitForIdle();
+-    m_device->getImplicitLfx2Context()->Reset();
++    m_device->getImplicitLfx2Context()->reset();
+ 
+     m_presentStatus.result = VK_SUCCESS;
+     m_dirtyHdrMetadata = true;
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 58771683..96c30d54 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -6452,7 +6452,7 @@ namespace dxvk {
+     if (m_type != DxvkContextType::Primary)
+       Logger::err("beginLfx2Frame should only be called on immediate contexts");
+     if (!m_lfx2Frame) {
+-      m_lfx2Frame = m_device->getImplicitLfx2Context()->DequeueFrame(critical);
++      m_lfx2Frame = m_device->getImplicitLfx2Context()->dequeueFrame(critical);
+       if (m_lfx2Frame) {
+         auto query = m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+         m_device->lfx2().MarkSection(m_lfx2Frame,
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+index aa844668..2caa8983 100644
+--- a/src/dxvk/dxvk_lfx2.cpp
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -36,6 +36,11 @@ namespace dxvk {
+ #ifdef _WIN32
+     LOAD_PFN(TimestampFromQpc);
+ #endif
++    LOAD_PFN(ImplicitContextCreate);
++    LOAD_PFN(ImplicitContextRelease);
++    LOAD_PFN(ImplicitContextReset);
++    LOAD_PFN(FrameCreateImplicit);
++    LOAD_PFN(FrameDequeueImplicit);
+ 
+ #undef LOAD_PFN
+   }
+@@ -114,52 +119,23 @@ namespace dxvk {
+   }
+ 
+   DxvkLfx2ImplicitContext::DxvkLfx2ImplicitContext(Lfx2Fn *lfx2): m_lfx2(lfx2) {
++    m_context = m_lfx2->ImplicitContextCreate();
+   }
+ 
+   DxvkLfx2ImplicitContext::~DxvkLfx2ImplicitContext() {
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-    m_frames.clear();
+-  }
+-
+-  void DxvkLfx2ImplicitContext::EnqueueFrame(Lfx2Frame frame) {
+-    std::unique_lock<std::mutex> lock(m_mutex, std::defer_lock);
+-    if (m_needReset.load()) {
+-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+-      lock.lock();
+-      Logger::info("Reset LFX2 context done");
+-      m_needReset.store(false);
+-      m_frames.clear();
+-    } else {
+-      lock.lock();
+-    }
+-    m_frames.push_back(std::move(frame));
+-    if (m_frames.size() >= 16) {
+-      Logger::info("Resetting LFX2 context: too many inflight frames");
+-      m_needReset.store(true);
+-    }
++    m_lfx2->ImplicitContextRelease(m_context);
+   }
+ 
+-  Lfx2Frame DxvkLfx2ImplicitContext::DequeueFrame(bool critical) {
+-    if (m_needReset.load()) {
+-      return {};
+-    }
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-    if (m_frames.empty()) {
+-      if (critical) {
+-        Logger::info("Resetting LFX2 context: no frames");
+-        m_needReset.store(true);
+-      }
+-      return {};
+-    }
+-    Lfx2Frame frame = std::move(m_frames.front());
+-    m_frames.pop_front();
+-    return frame;
++  Lfx2Frame DxvkLfx2ImplicitContext::dequeueFrame(bool critical) {
++    lfx2Frame *frame = m_lfx2->FrameDequeueImplicit(m_context, critical);
++    Lfx2Frame wrapper(*m_lfx2, frame);
++    if (frame)
++      m_lfx2->FrameRelease(frame);
++    return wrapper;
+   }
+ 
+-  void DxvkLfx2ImplicitContext::Reset() {
+-    std::lock_guard<std::mutex> lock(m_mutex);
+-    Logger::info("Resetting LFX2 context: initiated by swapchain");
+-    m_needReset.store(true);
++  void DxvkLfx2ImplicitContext::reset() {
++    m_lfx2->ImplicitContextReset(m_context);
+   }
+ 
+   Lfx2Frame::Lfx2Frame() {
+@@ -167,7 +143,8 @@ namespace dxvk {
+   }
+ 
+   Lfx2Frame::Lfx2Frame(const Lfx2Fn &lfx2, lfx2Frame *lfx2Frame) : m_lfx2(&lfx2), m_lfx2Frame(lfx2Frame) {
+-    m_lfx2->FrameAddRef(m_lfx2Frame);
++    if (m_lfx2Frame)
++      m_lfx2->FrameAddRef(m_lfx2Frame);
+   }
+ 
+   Lfx2Frame::~Lfx2Frame() {
+diff --git a/src/dxvk/dxvk_lfx2.h b/src/dxvk/dxvk_lfx2.h
+index 809234dc..96c7931b 100644
+--- a/src/dxvk/dxvk_lfx2.h
++++ b/src/dxvk/dxvk_lfx2.h
+@@ -26,6 +26,11 @@ namespace dxvk {
+ #ifdef _WIN32
+     DECLARE_PFN(TimestampFromQpc);
+ #endif
++    DECLARE_PFN(ImplicitContextCreate);
++    DECLARE_PFN(ImplicitContextRelease);
++    DECLARE_PFN(ImplicitContextReset);
++    DECLARE_PFN(FrameCreateImplicit);
++    DECLARE_PFN(FrameDequeueImplicit);
+ 
+ #undef DECLARE_PFN
+ 
+@@ -58,15 +63,13 @@ namespace dxvk {
+   public:
+     explicit DxvkLfx2ImplicitContext(Lfx2Fn *lfx2);
+     ~DxvkLfx2ImplicitContext();
+-    void EnqueueFrame(Lfx2Frame frame);
+-    Lfx2Frame DequeueFrame(bool critical);
+-    void Reset();
++    lfx2ImplicitContext *context() const { return m_context; }
++    Lfx2Frame dequeueFrame(bool critical);
++    void reset();
+ 
+   private:
+     Lfx2Fn *m_lfx2;
+-    std::mutex m_mutex;
+-    std::deque<Lfx2Frame> m_frames;
+-    std::atomic_bool m_needReset = false;
++    lfx2ImplicitContext *m_context;
+   };
+ 
+   class DxvkLfx2Tracker {
+-- 
+2.43.0
+
+
+From 64c9787651113a57810ff677bf09b89d6d4af55e Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Sun, 8 Jan 2023 19:09:59 +0900
+Subject: [PATCH 08/12] Convert to new unified ID3DLfx2ExtDevice API
+
+---
+ include/latencyflex2.h          | 46 +++++++++++++++++++++++--
+ src/d3d11/d3d11_context.cpp     |  3 +-
+ src/d3d11/d3d11_context_ext.cpp | 28 ----------------
+ src/d3d11/d3d11_context_ext.h   |  6 +---
+ src/d3d11/d3d11_context_imm.h   |  1 +
+ src/d3d11/d3d11_device.cpp      | 59 +++++++++++++++++++++++++++++----
+ src/d3d11/d3d11_device.h        | 29 ++++++++++++++--
+ src/d3d11/d3d11_interfaces.h    | 28 +++++-----------
+ 8 files changed, 135 insertions(+), 65 deletions(-)
+
+diff --git a/include/latencyflex2.h b/include/latencyflex2.h
+index 9de7a1cf..91ab1397 100644
+--- a/include/latencyflex2.h
++++ b/include/latencyflex2.h
+@@ -6,12 +6,24 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <stdlib.h>
++#ifdef LFX2_DX12
++#include <d3d12.h>
++#endif
++
+ #ifdef _WIN32
+ #define LFX2_API __declspec(dllimport)
+ #else
+ #define LFX2_API
+ #endif
+ 
++#ifdef LFX2_DX12
++typedef struct lfx2Dx12SubmitAux {
++    ID3D12GraphicsCommandList* executeBefore;
++    ID3D12GraphicsCommandList* executeAfter;
++    ID3D12Fence* fence;
++    uint64_t fenceValue;
++} lfx2Dx12SubmitAux;
++#endif
+ 
+ typedef enum lfx2MarkType {
+   lfx2MarkTypeBegin,
+@@ -20,6 +32,10 @@ typedef enum lfx2MarkType {
+ 
+ typedef struct lfx2Context lfx2Context;
+ 
++#if (defined(LFX2_DX12) && defined(_WIN32))
++typedef struct lfx2Dx12Context lfx2Dx12Context;
++#endif
++
+ /**
+  * A write handle for frame markers.
+  */
+@@ -35,6 +51,32 @@ typedef uint32_t lfx2SectionId;
+ extern "C" {
+ #endif // __cplusplus
+ 
++#if (defined(LFX2_DX12) && defined(_WIN32))
++LFX2_API struct lfx2Dx12Context *lfx2Dx12ContextCreate(ID3D12Device* device);
++#endif
++
++#if (defined(LFX2_DX12) && defined(_WIN32))
++LFX2_API void lfx2Dx12ContextAddRef(struct lfx2Dx12Context *context);
++#endif
++
++#if (defined(LFX2_DX12) && defined(_WIN32))
++LFX2_API void lfx2Dx12ContextRelease(struct lfx2Dx12Context *context);
++#endif
++
++#if (defined(LFX2_DX12) && defined(_WIN32))
++LFX2_API
++lfx2Dx12SubmitAux lfx2Dx12ContextBeforeSubmit(struct lfx2Dx12Context *context,
++                                              ID3D12CommandQueue* queue);
++#endif
++
++#if (defined(LFX2_DX12) && defined(_WIN32))
++LFX2_API void lfx2Dx12ContextBeginFrame(struct lfx2Dx12Context *context, struct lfx2Frame *frame);
++#endif
++
++#if (defined(LFX2_DX12) && defined(_WIN32))
++LFX2_API void lfx2Dx12ContextEndFrame(struct lfx2Dx12Context *context, struct lfx2Frame *frame);
++#endif
++
+ LFX2_API lfx2Timestamp lfx2TimestampNow(void);
+ 
+ #if defined(_WIN32)
+@@ -70,8 +112,8 @@ LFX2_API void lfx2ImplicitContextRelease(struct lfx2ImplicitContext *context);
+ LFX2_API void lfx2ImplicitContextReset(struct lfx2ImplicitContext *context);
+ 
+ LFX2_API
+-void lfx2FrameCreateImplicit(struct lfx2ImplicitContext *context,
+-                             lfx2Timestamp *out_timestamp);
++struct lfx2Frame *lfx2FrameCreateImplicit(struct lfx2ImplicitContext *context,
++                                          lfx2Timestamp *out_timestamp);
+ 
+ LFX2_API
+ struct lfx2Frame *lfx2FrameDequeueImplicit(struct lfx2ImplicitContext *context,
+diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
+index a24b78b0..977a403e 100644
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -50,8 +50,7 @@ namespace dxvk {
+     }
+ 
+     if (riid == __uuidof(ID3D11VkExtContext)
+-     || riid == __uuidof(ID3D11VkExtContext1)
+-     || riid == __uuidof(ID3D11VkExtContext2)) {
++     || riid == __uuidof(ID3D11VkExtContext1)) {
+       *ppvObject = ref(&m_contextExt);
+       return S_OK;
+     }
+diff --git a/src/d3d11/d3d11_context_ext.cpp b/src/d3d11/d3d11_context_ext.cpp
+index 3e33f2dc..6512656a 100644
+--- a/src/d3d11/d3d11_context_ext.cpp
++++ b/src/d3d11/d3d11_context_ext.cpp
+@@ -215,34 +215,6 @@ namespace dxvk {
+     return true;
+   }
+ 
+-  template<typename ContextType>
+-  bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::MarkRenderStartLFX2(void *frame) {
+-    auto query = m_ctx->m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+-    auto frameWrapper = Lfx2Frame(m_ctx->m_device->lfx2(), static_cast<lfx2Frame *>(frame));
+-
+-    m_ctx->EmitCs([query, cDevice = m_ctx->m_device, frameWrapper] (DxvkContext* ctx) {
+-      auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.MarkSection(frameWrapper, 800, lfx2MarkType::lfx2MarkTypeBegin, cLfx2.TimestampNow());
+-      ctx->writeTimestamp(query);
+-      ctx->trackLatencyMarker(frameWrapper, query, false);
+-    });
+-    return true;
+-  }
+-
+-  template<typename ContextType>
+-  bool STDMETHODCALLTYPE D3D11DeviceContextExt<ContextType>::MarkRenderEndLFX2(void *frame) {
+-    auto query = m_ctx->m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+-    auto frameWrapper = Lfx2Frame(m_ctx->m_device->lfx2(), static_cast<lfx2Frame *>(frame));
+-
+-    m_ctx->EmitCs([query, cDevice = m_ctx->m_device, frameWrapper] (DxvkContext* ctx) {
+-      auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.MarkSection(frameWrapper, 800, lfx2MarkType::lfx2MarkTypeEnd, cLfx2.TimestampNow());
+-      ctx->writeTimestamp(query);
+-      ctx->trackLatencyMarker(frameWrapper, query, true);
+-    });
+-    return true;
+-  }
+-
+   template class D3D11DeviceContextExt<D3D11DeferredContext>;
+   template class D3D11DeviceContextExt<D3D11ImmediateContext>;
+ 
+diff --git a/src/d3d11/d3d11_context_ext.h b/src/d3d11/d3d11_context_ext.h
+index 3b17d1f5..6b95dcf9 100644
+--- a/src/d3d11/d3d11_context_ext.h
++++ b/src/d3d11/d3d11_context_ext.h
+@@ -8,7 +8,7 @@ namespace dxvk {
+   class D3D11ImmediateContext;
+ 
+   template<typename ContextType>
+-  class D3D11DeviceContextExt : public ID3D11VkExtContext2 {
++  class D3D11DeviceContextExt : public ID3D11VkExtContext1 {
+     
+   public:
+     
+@@ -71,10 +71,6 @@ namespace dxvk {
+             void* const*            pWriteResources,
+             uint32_t                NumWriteResources);
+ 
+-    bool STDMETHODCALLTYPE MarkRenderStartLFX2(void *lfx2Frame);
+-
+-    bool STDMETHODCALLTYPE MarkRenderEndLFX2(void *lfx2Frame);
+-
+   private:
+     
+     ContextType* m_ctx;
+diff --git a/src/d3d11/d3d11_context_imm.h b/src/d3d11/d3d11_context_imm.h
+index ffd2c703..f5b105e8 100644
+--- a/src/d3d11/d3d11_context_imm.h
++++ b/src/d3d11/d3d11_context_imm.h
+@@ -18,6 +18,7 @@ namespace dxvk {
+     friend class D3D11SwapChain;
+     friend class D3D11VideoContext;
+     friend class D3D11DXGIKeyedMutex;
++    friend class D3D11DeviceLfx2Ext;
+   public:
+     
+     D3D11ImmediateContext(
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 0bee3d3d..a11b8835 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -2784,10 +2784,6 @@ namespace dxvk {
+     return static_cast<ID3D11ShaderResourceView*>(got->second);
+   }
+ 
+-  void *D3D11DeviceExt::GetImplicitContextLFX2() {
+-    return m_device->GetDXVKDevice()->getImplicitLfx2Context()->context();
+-  }
+-
+   D3D11VideoDevice::D3D11VideoDevice(
+           D3D11DXGIDevice*        pContainer,
+           D3D11Device*            pDevice)
+@@ -3087,6 +3083,7 @@ namespace dxvk {
+     m_dxvkDevice    (pDxvkDevice),
+     m_d3d11Device   (this, FeatureLevel, FeatureFlags),
+     m_d3d11DeviceExt(this, &m_d3d11Device),
++    m_d3d11DeviceLfx2Ext(this, m_d3d11Device.m_context.ptr()),
+     m_d3d11Interop  (this, &m_d3d11Device),
+     m_d3d11Video    (this, &m_d3d11Device),
+     m_d3d11on12     (this, &m_d3d11Device, pD3D12Device, pD3D12Queue),
+@@ -3141,11 +3138,15 @@ namespace dxvk {
+     }
+     
+     if (riid == __uuidof(ID3D11VkExtDevice)
+-     || riid == __uuidof(ID3D11VkExtDevice1)
+-     || riid == __uuidof(ID3D11VkExtDevice2)) {
++     || riid == __uuidof(ID3D11VkExtDevice1)) {
+       *ppvObject = ref(&m_d3d11DeviceExt);
+       return S_OK;
+     }
++
++    if (riid == __uuidof(ID3DLfx2ExtDevice)) {
++      *ppvObject = ref(&m_d3d11DeviceLfx2Ext);
++      return S_OK;
++    }
+     
+     if (riid == __uuidof(IDXGIDXVKDevice)) {
+       *ppvObject = ref(&m_metaDevice);
+@@ -3432,4 +3433,50 @@ namespace dxvk {
+     return m_dxvkDevice;
+   }
+ 
++  D3D11DeviceLfx2Ext::D3D11DeviceLfx2Ext(
++      D3D11DXGIDevice*        pContainer,
++      D3D11ImmediateContext*            pImmediateContext)
++      : m_container(pContainer), m_immediateContext(pImmediateContext), m_dxvkDevice(pContainer->GetDXVKDevice()) {
++
++  }
++
++  HRESULT STDMETHODCALLTYPE D3D11DeviceLfx2Ext::QueryInterface(const IID &riid, void **ppvObject) {
++    return m_container->QueryInterface(riid, ppvObject);
++  }
++
++  ULONG STDMETHODCALLTYPE D3D11DeviceLfx2Ext::AddRef() {
++    return m_container->AddRef();
++  }
++
++  ULONG STDMETHODCALLTYPE D3D11DeviceLfx2Ext::Release() {
++    return m_container->Release();
++  }
++
++  void STDMETHODCALLTYPE D3D11DeviceLfx2Ext::ImplicitBeginFrame(uint64_t *outTimestamp, void *outFrame) {
++    *(lfx2Frame **)outFrame = m_dxvkDevice->lfx2().FrameCreateImplicit(m_dxvkDevice->getImplicitLfx2Context()->context(), outTimestamp);
++  }
++
++  void STDMETHODCALLTYPE D3D11DeviceLfx2Ext::MarkRenderStart(void *frame) {
++    auto query = m_dxvkDevice->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
++    auto frameWrapper = Lfx2Frame(m_dxvkDevice->lfx2(), static_cast<lfx2Frame *>(frame));
++
++    m_immediateContext->EmitCs([query, cDevice = m_dxvkDevice, frameWrapper] (DxvkContext* ctx) {
++      auto &cLfx2 = cDevice->lfx2();
++      cLfx2.MarkSection(frameWrapper, 800, lfx2MarkType::lfx2MarkTypeBegin, cLfx2.TimestampNow());
++      ctx->writeTimestamp(query);
++      ctx->trackLatencyMarker(frameWrapper, query, false);
++    });
++  }
++
++  void STDMETHODCALLTYPE D3D11DeviceLfx2Ext::MarkRenderEnd(void *frame) {
++    auto query = m_dxvkDevice->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
++    auto frameWrapper = Lfx2Frame(m_dxvkDevice->lfx2(), static_cast<lfx2Frame *>(frame));
++
++    m_immediateContext->EmitCs([query, cDevice = m_dxvkDevice, frameWrapper] (DxvkContext* ctx) {
++      auto &cLfx2 = cDevice->lfx2();
++      cLfx2.MarkSection(frameWrapper, 800, lfx2MarkType::lfx2MarkTypeEnd, cLfx2.TimestampNow());
++      ctx->writeTimestamp(query);
++      ctx->trackLatencyMarker(frameWrapper, query, true);
++    });
++  }
+ }
+diff --git a/src/d3d11/d3d11_device.h b/src/d3d11/d3d11_device.h
+index ab4763ed..d0d6a285 100644
+--- a/src/d3d11/d3d11_device.h
++++ b/src/d3d11/d3d11_device.h
+@@ -48,6 +48,7 @@ namespace dxvk {
+    * as part of a \ref D3D11DeviceContainer.
+    */
+   class D3D11Device final : public ID3D11Device5 {
++    friend class D3D11DXGIDevice;
+     /// Maximum number of resource init commands per command buffer
+     constexpr static uint64_t InitCommandThreshold = 50;
+   public:
+@@ -507,7 +508,7 @@ namespace dxvk {
+   /**
+    * \brief Extended D3D11 device
+    */
+-  class D3D11DeviceExt : public ID3D11VkExtDevice2 {
++  class D3D11DeviceExt : public ID3D11VkExtDevice1 {
+     
+   public:
+     
+@@ -562,8 +563,6 @@ namespace dxvk {
+             ID3D11SamplerState**      ppSamplerState,
+             uint32_t*                 pDriverHandle);
+ 
+-    void* STDMETHODCALLTYPE GetImplicitContextLFX2();
+-
+   private:
+     
+     D3D11DXGIDevice* m_container;
+@@ -698,6 +697,29 @@ namespace dxvk {
+ 
+   };
+ 
++  class D3D11DeviceLfx2Ext : public ID3DLfx2ExtDevice {
++  public:
++    D3D11DeviceLfx2Ext(D3D11DXGIDevice *pContainer,
++                       D3D11ImmediateContext *pImmediateContext);
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(const IID &riid, void **ppvObject);
++
++    ULONG STDMETHODCALLTYPE AddRef();
++
++    ULONG STDMETHODCALLTYPE Release();
++
++    void STDMETHODCALLTYPE ImplicitBeginFrame(uint64_t *outTimestamp, void *outFrame);
++
++    void STDMETHODCALLTYPE MarkRenderStart(void *frame);
++
++    void STDMETHODCALLTYPE MarkRenderEnd(void *frame);
++
++  private:
++    D3D11DXGIDevice *m_container;
++    D3D11ImmediateContext *m_immediateContext;
++    const Rc<DxvkDevice> m_dxvkDevice;
++  };
++
+ 
+   /**
+    * \brief DXVK swap chain factory
+@@ -860,6 +882,7 @@ namespace dxvk {
+ 
+     D3D11Device         m_d3d11Device;
+     D3D11DeviceExt      m_d3d11DeviceExt;
++    D3D11DeviceLfx2Ext  m_d3d11DeviceLfx2Ext;
+     D3D11VkInterop      m_d3d11Interop;
+     D3D11VideoDevice    m_d3d11Video;
+     D3D11on12Device     m_d3d11on12;
+diff --git a/src/d3d11/d3d11_interfaces.h b/src/d3d11/d3d11_interfaces.h
+index 08a99cff..8443f0a3 100644
+--- a/src/d3d11/d3d11_interfaces.h
++++ b/src/d3d11/d3d11_interfaces.h
+@@ -115,10 +115,14 @@ ID3D11VkExtDevice1 : public ID3D11VkExtDevice {
+           uint32_t*               pCudaTextureHandle) = 0;
+ };
+ 
+-MIDL_INTERFACE("a1a5185c-0c43-4608-91a0-97a0cd098d48")
+-ID3D11VkExtDevice2 : public ID3D11VkExtDevice1 {
++MIDL_INTERFACE("851a9f0f-5da0-4850-b563-a7bbc414f4e6")
++ID3DLfx2ExtDevice : public IUnknown {
+ 
+-  virtual void* STDMETHODCALLTYPE GetImplicitContextLFX2() = 0;
++  virtual void STDMETHODCALLTYPE MarkRenderStart(void *frame) = 0;
++
++  virtual void STDMETHODCALLTYPE MarkRenderEnd(void *frame) = 0;
++
++  virtual void STDMETHODCALLTYPE ImplicitBeginFrame(uint64_t *outTimestamp, void *outFrame) = 0;
+ 
+ };
+ 
+@@ -190,32 +194,18 @@ ID3D11VkExtContext1 : public ID3D11VkExtContext {
+           uint32_t                numWriteResources) = 0;
+ };
+ 
+-MIDL_INTERFACE("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")
+-ID3D11VkExtContext2 : public ID3D11VkExtContext1 {
+-
+-  virtual bool STDMETHODCALLTYPE MarkRenderStartLFX2(
+-      void*                   lfx2Frame) = 0;
+-
+-  virtual bool STDMETHODCALLTYPE MarkRenderEndLFX2(
+-      void*                   lfx2Frame) = 0;
+-
+-};
+-
+-
+ #ifdef _MSC_VER
+ struct __declspec(uuid("bb8a4fb9-3935-4762-b44b-35189a26414a")) ID3D11VkExtShader;
+ struct __declspec(uuid("8a6e3c42-f74c-45b7-8265-a231b677ca17")) ID3D11VkExtDevice;
+ struct __declspec(uuid("cfcf64ef-9586-46d0-bca4-97cf2ca61b06")) ID3D11VkExtDevice1;
+-struct __declspec(uuid("a1a5185c-0c43-4608-91a0-97a0cd098d48")) ID3D11VkExtDevice2;
++struct __declspec(uuid("851a9f0f-5da0-4850-b563-a7bbc414f4e6")) ID3DLfx2ExtDevice;
+ struct __declspec(uuid("fd0bca13-5cb6-4c3a-987e-4750de2ca791")) ID3D11VkExtContext;
+ struct __declspec(uuid("874b09b2-ae0b-41d8-8476-5f3b7a0e879d")) ID3D11VkExtContext1;
+-struct __declspec(uuid("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")) ID3D11VkExtContext2;
+ #else
+ __CRT_UUID_DECL(ID3D11VkExtShader,         0xbb8a4fb9,0x3935,0x4762,0xb4,0x4b,0x35,0x18,0x9a,0x26,0x41,0x4a);
+ __CRT_UUID_DECL(ID3D11VkExtDevice,         0x8a6e3c42,0xf74c,0x45b7,0x82,0x65,0xa2,0x31,0xb6,0x77,0xca,0x17);
+ __CRT_UUID_DECL(ID3D11VkExtDevice1,        0xcfcf64ef,0x9586,0x46d0,0xbc,0xa4,0x97,0xcf,0x2c,0xa6,0x1b,0x06);
+-__CRT_UUID_DECL(ID3D11VkExtDevice2,        0xa1a5185c,0x0c43,0x4608,0x91,0xa0,0x97,0xa0,0xcd,0x09,0x8d,0x48);
++__CRT_UUID_DECL(ID3DLfx2ExtDevice,         0x851a9f0f,0x5da0,0x4850,0xb5,0x63,0xa7,0xbb,0xc4,0x14,0xf4,0xe6);
+ __CRT_UUID_DECL(ID3D11VkExtContext,        0xfd0bca13,0x5cb6,0x4c3a,0x98,0x7e,0x47,0x50,0xde,0x2c,0xa7,0x91);
+ __CRT_UUID_DECL(ID3D11VkExtContext1,       0x874b09b2,0xae0b,0x41d8,0x84,0x76,0x5f,0x3b,0x7a,0x0e,0x87,0x9d);
+-__CRT_UUID_DECL(ID3D11VkExtContext2,       0x6e65f21a,0x0ecd,0x4e76,0x8f,0xaf,0x9e,0x9a,0xfa,0x40,0x93,0xa4);
+ #endif
+-- 
+2.43.0
+
+
+From 20960e4000854dc849c1d35fabf387a83f0ca3d1 Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Fri, 13 Jan 2023 18:56:54 +0900
+Subject: [PATCH 09/12] Don't call FreeLibrary within unload callback
+
+In attempt to fix shutdown hang.
+---
+ src/dxvk/dxvk_lfx2.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+index 2caa8983..4d5298db 100644
+--- a/src/dxvk/dxvk_lfx2.cpp
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -49,6 +49,10 @@ namespace dxvk {
+     if (m_lfxModule == nullptr)
+       return;
+ 
++    // Calling FreeLibrary deadlocks if called from DllMain.
++    if (this_thread::isInModuleDetachment())
++      return;
++
+     ::FreeLibrary(m_lfxModule);
+     m_lfxModule = nullptr;
+   }
+-- 
+2.43.0
+
+
+From 6d945ce3607d529b5e6d2d75d4d393c69486a358 Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Sun, 15 Jan 2023 12:51:34 +0900
+Subject: [PATCH 10/12] Port to new LFX2 Vulkan Context API
+
+---
+ include/latencyflex2.h          | 73 +++++++++++++++++++++++----------
+ src/d3d11/d3d11_context_imm.cpp |  2 +-
+ src/d3d11/d3d11_device.cpp      | 15 +++----
+ src/dxvk/dxvk_cmdlist.cpp       | 15 +++++--
+ src/dxvk/dxvk_cmdlist.h         | 12 +++---
+ src/dxvk/dxvk_context.cpp       | 27 ++++--------
+ src/dxvk/dxvk_context.h         |  2 -
+ src/dxvk/dxvk_device.cpp        |  7 ++++
+ src/dxvk/dxvk_device.h          |  2 +
+ src/dxvk/dxvk_lfx2.cpp          | 66 +++--------------------------
+ src/dxvk/dxvk_lfx2.h            | 19 +++------
+ 11 files changed, 106 insertions(+), 134 deletions(-)
+
+diff --git a/include/latencyflex2.h b/include/latencyflex2.h
+index 91ab1397..9e8d1536 100644
+--- a/include/latencyflex2.h
++++ b/include/latencyflex2.h
+@@ -1,11 +1,17 @@
+ #ifndef LATENCYFLEX2_H
+ #define LATENCYFLEX2_H
+ 
++#define LFX2_VK
++
+ #include <stdarg.h>
+ #include <stdbool.h>
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <stdlib.h>
++#ifdef LFX2_VK
++#include <vulkan/vulkan.h>
++#endif
++
+ #ifdef LFX2_DX12
+ #include <d3d12.h>
+ #endif
+@@ -16,15 +22,6 @@
+ #define LFX2_API
+ #endif
+ 
+-#ifdef LFX2_DX12
+-typedef struct lfx2Dx12SubmitAux {
+-    ID3D12GraphicsCommandList* executeBefore;
+-    ID3D12GraphicsCommandList* executeAfter;
+-    ID3D12Fence* fence;
+-    uint64_t fenceValue;
+-} lfx2Dx12SubmitAux;
+-#endif
+-
+ typedef enum lfx2MarkType {
+   lfx2MarkTypeBegin,
+   lfx2MarkTypeEnd,
+@@ -43,37 +40,49 @@ typedef struct lfx2Frame lfx2Frame;
+ 
+ typedef struct lfx2ImplicitContext lfx2ImplicitContext;
+ 
++#if defined(LFX2_VK)
++typedef struct lfx2VulkanContext lfx2VulkanContext;
++#endif
++
++#if (defined(LFX2_DX12) && defined(_WIN32))
++typedef struct lfx2Dx12SubmitAux {
++  ID3D12GraphicsCommandList* execute_before;
++  ID3D12GraphicsCommandList* execute_after;
++  ID3D12Fence* signal_fence;
++  uint64_t signal_fence_value;
++} lfx2Dx12SubmitAux;
++#endif
++
+ typedef uint64_t lfx2Timestamp;
+ 
+ typedef uint32_t lfx2SectionId;
+ 
++#if defined(LFX2_VK)
++typedef struct lfx2VulkanSubmitAux {
++  VkCommandBuffer submit_before;
++  VkCommandBuffer submit_after;
++  VkSemaphore signal_sem;
++  uint64_t signal_sem_value;
++} lfx2VulkanSubmitAux;
++#endif
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif // __cplusplus
+ 
+ #if (defined(LFX2_DX12) && defined(_WIN32))
+ LFX2_API struct lfx2Dx12Context *lfx2Dx12ContextCreate(ID3D12Device* device);
+-#endif
+ 
+-#if (defined(LFX2_DX12) && defined(_WIN32))
+ LFX2_API void lfx2Dx12ContextAddRef(struct lfx2Dx12Context *context);
+-#endif
+ 
+-#if (defined(LFX2_DX12) && defined(_WIN32))
+ LFX2_API void lfx2Dx12ContextRelease(struct lfx2Dx12Context *context);
+-#endif
+ 
+-#if (defined(LFX2_DX12) && defined(_WIN32))
+ LFX2_API
+-lfx2Dx12SubmitAux lfx2Dx12ContextBeforeSubmit(struct lfx2Dx12Context *context,
+-                                              ID3D12CommandQueue* queue);
+-#endif
++struct lfx2Dx12SubmitAux lfx2Dx12ContextBeforeSubmit(struct lfx2Dx12Context *context,
++                                                     ID3D12CommandQueue* queue);
+ 
+-#if (defined(LFX2_DX12) && defined(_WIN32))
+ LFX2_API void lfx2Dx12ContextBeginFrame(struct lfx2Dx12Context *context, struct lfx2Frame *frame);
+-#endif
+ 
+-#if (defined(LFX2_DX12) && defined(_WIN32))
+ LFX2_API void lfx2Dx12ContextEndFrame(struct lfx2Dx12Context *context, struct lfx2Frame *frame);
+ #endif
+ 
+@@ -119,6 +128,28 @@ LFX2_API
+ struct lfx2Frame *lfx2FrameDequeueImplicit(struct lfx2ImplicitContext *context,
+                                            bool critical);
+ 
++#if defined(LFX2_VK)
++LFX2_API
++struct lfx2VulkanContext *lfx2VulkanContextCreate(PFN_vkGetInstanceProcAddr gipa,
++                                                  VkInstance instance,
++                                                  VkPhysicalDevice physical_device,
++                                                  VkDevice device,
++                                                  uint32_t queue_family_index);
++
++LFX2_API void lfx2VulkanContextAddRef(struct lfx2VulkanContext *context);
++
++LFX2_API void lfx2VulkanContextRelease(struct lfx2VulkanContext *context);
++
++LFX2_API
++struct lfx2VulkanSubmitAux lfx2VulkanContextBeforeSubmit(struct lfx2VulkanContext *context);
++
++LFX2_API
++void lfx2VulkanContextBeginFrame(struct lfx2VulkanContext *context,
++                                 struct lfx2Frame *frame);
++
++LFX2_API void lfx2VulkanContextEndFrame(struct lfx2VulkanContext *context, struct lfx2Frame *frame);
++#endif
++
+ #ifdef __cplusplus
+ } // extern "C"
+ #endif // __cplusplus
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index 32e3eb78..767956c2 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -842,8 +842,8 @@ namespace dxvk {
+     D3D10DeviceLock lock = LockContext();
+ 
+     EmitCs<false>([] (DxvkContext* ctx) {
+-      ctx->endLfx2Frame();
+       ctx->endFrame();
++      ctx->endLfx2Frame();
+     });
+   }
+ 
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index a11b8835..ea39e6fe 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -3457,26 +3457,21 @@ namespace dxvk {
+   }
+ 
+   void STDMETHODCALLTYPE D3D11DeviceLfx2Ext::MarkRenderStart(void *frame) {
+-    auto query = m_dxvkDevice->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+     auto frameWrapper = Lfx2Frame(m_dxvkDevice->lfx2(), static_cast<lfx2Frame *>(frame));
+ 
+-    m_immediateContext->EmitCs([query, cDevice = m_dxvkDevice, frameWrapper] (DxvkContext* ctx) {
++    m_immediateContext->EmitCs([cDevice = m_dxvkDevice, frameWrapper] (DxvkContext* ctx) {
+       auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.MarkSection(frameWrapper, 800, lfx2MarkType::lfx2MarkTypeBegin, cLfx2.TimestampNow());
+-      ctx->writeTimestamp(query);
+-      ctx->trackLatencyMarker(frameWrapper, query, false);
++      cLfx2.VulkanContextBeginFrame(cDevice->getLfx2VkContext(), frameWrapper);
+     });
+   }
+ 
+   void STDMETHODCALLTYPE D3D11DeviceLfx2Ext::MarkRenderEnd(void *frame) {
+-    auto query = m_dxvkDevice->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+     auto frameWrapper = Lfx2Frame(m_dxvkDevice->lfx2(), static_cast<lfx2Frame *>(frame));
+ 
+-    m_immediateContext->EmitCs([query, cDevice = m_dxvkDevice, frameWrapper] (DxvkContext* ctx) {
++    m_immediateContext->EmitCs([cDevice = m_dxvkDevice, frameWrapper] (DxvkContext* ctx) {
+       auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.MarkSection(frameWrapper, 800, lfx2MarkType::lfx2MarkTypeEnd, cLfx2.TimestampNow());
+-      ctx->writeTimestamp(query);
+-      ctx->trackLatencyMarker(frameWrapper, query, true);
++      ctx->flushCommandList();
++      cLfx2.VulkanContextEndFrame(cDevice->getLfx2VkContext(), frameWrapper);
+     });
+   }
+ }
+diff --git a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
+index ad190fc0..a38fea40 100644
+--- a/src/dxvk/dxvk_cmdlist.cpp
++++ b/src/dxvk/dxvk_cmdlist.cpp
+@@ -170,8 +170,7 @@ namespace dxvk {
+   DxvkCommandList::DxvkCommandList(DxvkDevice* device)
+   : m_device        (device),
+     m_vkd           (device->vkd()),
+-    m_vki           (device->instance()->vki()),
+-    m_lfx2Tracker   (device) {
++    m_vki           (device->instance()->vki()) {
+     const auto& graphicsQueue = m_device->queues().graphics;
+     const auto& transferQueue = m_device->queues().transfer;
+ 
+@@ -273,6 +272,9 @@ namespace dxvk {
+           0, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
+       }
+ 
++      if (isFirst && m_lfx2Aux.submit_before)
++        m_commandSubmission.executeCommandBuffer(m_lfx2Aux.submit_before);
++
+       // Submit graphics commands
+       if (cmd.usedFlags.test(DxvkCmdBuffer::InitBuffer))
+         m_commandSubmission.executeCommandBuffer(cmd.initBuffer);
+@@ -297,6 +299,12 @@ namespace dxvk {
+         m_commandSubmission.signalFence(m_fence);
+       }
+ 
++      if (isLast && m_lfx2Aux.submit_after)
++        m_commandSubmission.executeCommandBuffer(m_lfx2Aux.submit_after);
++      if (isLast && m_lfx2Aux.signal_sem)
++        m_commandSubmission.signalSemaphore(m_lfx2Aux.signal_sem, m_lfx2Aux.signal_sem_value,
++                                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
++
+       // Finally, submit all graphics commands of the current submission
+       if ((status = m_commandSubmission.submit(m_device, graphics.queueHandle)))
+         return status;
+@@ -365,6 +373,8 @@ namespace dxvk {
+ 
+ 
+   void DxvkCommandList::reset() {
++    m_lfx2Aux = {};
++
+     // Free resources and other objects
+     // that are no longer in use
+     m_resources.reset();
+@@ -375,7 +385,6 @@ namespace dxvk {
+     // Return query and event handles
+     m_gpuQueryTracker.reset();
+     m_gpuEventTracker.reset();
+-    m_lfx2Tracker.reset();
+ 
+     // Less important stuff
+     m_signalTracker.reset();
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+index 471ed65a..361448ea 100644
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -321,17 +321,12 @@ namespace dxvk {
+       m_signalTracker.add(signal, value);
+     }
+ 
+-    void trackLatencyMarker(Lfx2Frame lfx2Frame, Rc<DxvkGpuQuery> timestampQuery, bool end) {
+-      m_lfx2Tracker.add(std::move(lfx2Frame), std::move(timestampQuery), end);
+-    }
+-
+     /**
+      * \brief Notifies resources and signals
+      */
+     void notifyObjects() {
+       m_resources.notify();
+       m_signalTracker.notify();
+-      m_lfx2Tracker.notify();
+     }
+ 
+     /**
+@@ -1033,6 +1028,10 @@ namespace dxvk {
+       m_descriptorPools.push_back({ pool, manager });
+     }
+ 
++    void setLfx2Aux(lfx2VulkanSubmitAux aux) {
++      m_lfx2Aux = aux;
++    }
++
+   private:
+     
+     DxvkDevice*               m_device;
+@@ -1057,7 +1056,6 @@ namespace dxvk {
+     DxvkGpuQueryTracker       m_gpuQueryTracker;
+     DxvkBufferTracker         m_bufferTracker;
+     DxvkStatCounters          m_statCounters;
+-    DxvkLfx2Tracker           m_lfx2Tracker;
+ 
+     DxvkCommandSubmission     m_commandSubmission;
+ 
+@@ -1073,6 +1071,8 @@ namespace dxvk {
+ 
+     std::vector<DxvkGraphicsPipeline*> m_pipelines;
+ 
++    lfx2VulkanSubmitAux m_lfx2Aux = {};
++
+     VkCommandBuffer getCmdBuffer(DxvkCmdBuffer cmdBuffer) const {
+       if (cmdBuffer == DxvkCmdBuffer::ExecBuffer) return m_cmd.execBuffer;
+       if (cmdBuffer == DxvkCmdBuffer::InitBuffer) return m_cmd.initBuffer;
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 96c30d54..2f34e712 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -106,8 +106,10 @@ namespace dxvk {
+ 
+ 
+   void DxvkContext::flushCommandList(DxvkSubmitStatus* status) {
+-    m_device->submitCommandList(
+-      this->endRecording(), status);
++    auto cmdList = this->endRecording();
++    if (m_type == DxvkContextType::Primary)
++      cmdList->setLfx2Aux(m_device->lfx2().VulkanContextBeforeSubmit(m_device->getLfx2VkContext()));
++    m_device->submitCommandList(cmdList, status);
+     
+     this->beginRecording(
+       m_device->createCommandList());
+@@ -6444,22 +6446,14 @@ namespace dxvk {
+     this->beginCurrentCommands();
+   }
+ 
+-  void DxvkContext::trackLatencyMarker(Lfx2Frame frame, Rc<DxvkGpuQuery> timestampQuery, bool end) {
+-    m_cmd->trackLatencyMarker(std::move(frame), std::move(timestampQuery), end);
+-  }
+-
+   void DxvkContext::tryBeginLfx2Frame(bool critical) {
+     if (m_type != DxvkContextType::Primary)
+       Logger::err("beginLfx2Frame should only be called on immediate contexts");
+     if (!m_lfx2Frame) {
+       m_lfx2Frame = m_device->getImplicitLfx2Context()->dequeueFrame(critical);
+       if (m_lfx2Frame) {
+-        auto query = m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+-        m_device->lfx2().MarkSection(m_lfx2Frame,
+-                                     800, lfx2MarkType::lfx2MarkTypeBegin,
+-                                     m_device->lfx2().TimestampNow());
+-        writeTimestamp(query);
+-        trackLatencyMarker(m_lfx2Frame, query, false);
++        auto &cLfx2 = m_device->lfx2();
++        cLfx2.VulkanContextBeginFrame(m_device->getLfx2VkContext(), m_lfx2Frame);
+       }
+     }
+   }
+@@ -6469,12 +6463,9 @@ namespace dxvk {
+       Logger::err("endLfx2Frame should only be called on immediate contexts");
+     tryBeginLfx2Frame(true);
+     if (m_lfx2Frame) {
+-      auto query = m_device->createGpuQuery(VK_QUERY_TYPE_TIMESTAMP, 0, 0);
+-      m_device->lfx2().MarkSection(m_lfx2Frame,
+-                                   800, lfx2MarkType::lfx2MarkTypeEnd,
+-                                   m_device->lfx2().TimestampNow());
+-      writeTimestamp(query);
+-      trackLatencyMarker(m_lfx2Frame, query, true);
++      flushCommandList();
++      auto &cLfx2 = m_device->lfx2();
++      cLfx2.VulkanContextEndFrame(m_device->getLfx2VkContext(), m_lfx2Frame);
+       m_lfx2Frame = {};
+     }
+   }
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 58970f4f..b709edb6 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -1391,8 +1391,6 @@ namespace dxvk {
+         m_cmd->addStatCtr(counter, value);
+     }
+ 
+-    void trackLatencyMarker(Lfx2Frame frame, Rc<DxvkGpuQuery> timestampQuery, bool end);
+-
+   private:
+     
+     Rc<DxvkDevice>          m_device;
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index d133930f..0c240eb1 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -22,6 +22,7 @@ namespace dxvk {
+     m_queues            (queues),
+     m_submissionQueue   (this, queueCallback) {
+ 
++    m_lfx2Vk = m_lfx2.VulkanContextCreate(instance->vki()->getLoaderProc(), instance->handle(), m_adapter->handle(), m_vkd->device(), queues.graphics.queueIndex);
+   }
+   
+   
+@@ -40,6 +41,8 @@ namespace dxvk {
+     // Stop workers explicitly in order to prevent
+     // access to structures that are being destroyed.
+     m_objects.pipelineManager().stopWorkerThreads();
++
++    m_lfx2.VulkanContextRelease(m_lfx2Vk);
+   }
+ 
+ 
+@@ -340,6 +343,10 @@ namespace dxvk {
+     m_recycledCommandLists.returnObject(cmdList);
+   }
+   
++  lfx2VulkanContext *DxvkDevice::getLfx2VkContext() {
++    return m_lfx2Vk;
++  }
++
+   DxvkLfx2ImplicitContext *DxvkDevice::getImplicitLfx2Context() {
+     return &m_lfx2ImplicitContext;
+   }
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+index 7fa12dc5..4e6c2ed7 100644
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -539,6 +539,7 @@ namespace dxvk {
+      */
+     void waitForIdle();
+ 
++    lfx2VulkanContext* getLfx2VkContext();
+     DxvkLfx2ImplicitContext* getImplicitLfx2Context();
+     
+   private:
+@@ -549,6 +550,7 @@ namespace dxvk {
+     Rc<DxvkAdapter>             m_adapter;
+     Rc<vk::DeviceFn>            m_vkd;
+     Lfx2Fn                      m_lfx2;
++    lfx2VulkanContext          *m_lfx2Vk;
+     DxvkLfx2ImplicitContext     m_lfx2ImplicitContext;
+ 
+     DxvkDeviceFeatures          m_features;
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+index 4d5298db..23e20bb9 100644
+--- a/src/dxvk/dxvk_lfx2.cpp
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -41,6 +41,12 @@ namespace dxvk {
+     LOAD_PFN(ImplicitContextReset);
+     LOAD_PFN(FrameCreateImplicit);
+     LOAD_PFN(FrameDequeueImplicit);
++    LOAD_PFN(VulkanContextCreate);
++    LOAD_PFN(VulkanContextAddRef);
++    LOAD_PFN(VulkanContextRelease);
++    LOAD_PFN(VulkanContextBeforeSubmit);
++    LOAD_PFN(VulkanContextBeginFrame);
++    LOAD_PFN(VulkanContextEndFrame);
+ 
+ #undef LOAD_PFN
+   }
+@@ -62,66 +68,6 @@ namespace dxvk {
+     return reinterpret_cast<T>(reinterpret_cast<void *>(::GetProcAddress(m_lfxModule, name)));
+   }
+ 
+-  DxvkLfx2Tracker::DxvkLfx2Tracker(DxvkDevice *device) : m_device(device) {
+-  }
+-
+-  void DxvkLfx2Tracker::add(Lfx2Frame lfx2Frame, Rc<DxvkGpuQuery> query, bool end) {
+-    m_query[end] = std::move(query);
+-    m_frame_handle[end] = std::move(lfx2Frame);
+-  }
+-
+-  void DxvkLfx2Tracker::notify() {
+-    for (uint32_t i = 0; i < 2; i++) {
+-      Rc<DxvkGpuQuery> &query = m_query[i];
+-      if (query.ptr()) {
+-        DxvkQueryData queryData; // NOLINT(cppcoreguidelines-pro-type-member-init)
+-        DxvkGpuQueryStatus status;
+-        while ((status = query->getData(queryData)) == DxvkGpuQueryStatus::Pending);
+-
+-        if (status == DxvkGpuQueryStatus::Available) {
+-          uint64_t gpuTimestamp = queryData.timestamp.time;
+-          VkCalibratedTimestampInfoEXT calibratedTimestampInfo[2];
+-          uint64_t calibratedTimestamps[2];
+-          uint64_t maxDeviation[2];
+-          calibratedTimestampInfo[0].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
+-          calibratedTimestampInfo[0].pNext = nullptr;
+-          calibratedTimestampInfo[0].timeDomain = VK_TIME_DOMAIN_DEVICE_EXT;
+-          calibratedTimestampInfo[1].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
+-          calibratedTimestampInfo[1].pNext = nullptr;
+-#ifdef _WIN32
+-          calibratedTimestampInfo[1].timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT;
+-#else
+-          calibratedTimestampInfo[1].timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT;
+-#endif
+-          m_device->vkd()->vkGetCalibratedTimestampsEXT(m_device->handle(), 2, calibratedTimestampInfo,
+-                                                        calibratedTimestamps, maxDeviation);
+-
+-#ifdef _WIN32
+-          uint64_t hostNsTimestamp = m_device->lfx2().TimestampFromQpc(calibratedTimestamps[1]);
+-#else
+-          uint64_t hostNsTimestamp = calibratedTimestamps[1];
+-#endif
+-          int64_t gpuTimestampDelta = gpuTimestamp - calibratedTimestamps[0];
+-          int64_t timestamp = hostNsTimestamp + (int64_t) (gpuTimestampDelta *
+-                                                           (double) m_device->adapter()->deviceProperties().limits.timestampPeriod);
+-
+-          m_device->lfx2().MarkSection(m_frame_handle[i],
+-                                       1000, i == 0 ? lfx2MarkType::lfx2MarkTypeBegin : lfx2MarkType::lfx2MarkTypeEnd,
+-                                       timestamp);
+-        }
+-      }
+-    }
+-  }
+-
+-  void DxvkLfx2Tracker::reset() {
+-    for (auto &i: m_query) {
+-      i = nullptr;
+-    }
+-    for (auto &i: m_frame_handle) {
+-      i = {};
+-    }
+-  }
+-
+   DxvkLfx2ImplicitContext::DxvkLfx2ImplicitContext(Lfx2Fn *lfx2): m_lfx2(lfx2) {
+     m_context = m_lfx2->ImplicitContextCreate();
+   }
+diff --git a/src/dxvk/dxvk_lfx2.h b/src/dxvk/dxvk_lfx2.h
+index 96c7931b..e6ae73df 100644
+--- a/src/dxvk/dxvk_lfx2.h
++++ b/src/dxvk/dxvk_lfx2.h
+@@ -31,6 +31,12 @@ namespace dxvk {
+     DECLARE_PFN(ImplicitContextReset);
+     DECLARE_PFN(FrameCreateImplicit);
+     DECLARE_PFN(FrameDequeueImplicit);
++    DECLARE_PFN(VulkanContextCreate);
++    DECLARE_PFN(VulkanContextAddRef);
++    DECLARE_PFN(VulkanContextRelease);
++    DECLARE_PFN(VulkanContextBeforeSubmit);
++    DECLARE_PFN(VulkanContextBeginFrame);
++    DECLARE_PFN(VulkanContextEndFrame);
+ 
+ #undef DECLARE_PFN
+ 
+@@ -72,17 +78,4 @@ namespace dxvk {
+     lfx2ImplicitContext *m_context;
+   };
+ 
+-  class DxvkLfx2Tracker {
+-  public:
+-    explicit DxvkLfx2Tracker(DxvkDevice *device);
+-    void add(Lfx2Frame frame, Rc<DxvkGpuQuery> query, bool end);
+-    void reset();
+-    void notify();
+-
+-  private:
+-    DxvkDevice *m_device;
+-    Rc<DxvkGpuQuery> m_query[2]{};
+-    Lfx2Frame m_frame_handle[2]{};
+-  };
+-
+ } // dxvk
+\ No newline at end of file
+-- 
+2.43.0
+
+
+From f0c5bc28ba765bc8e701b70f6896e260bc42c46f Mon Sep 17 00:00:00 2001
+From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
+Date: Tue, 7 Feb 2023 14:46:17 +0900
+Subject: [PATCH 11/12] Add support for explicit latency and throughput
+ annotation
+
+---
+ include/latencyflex2.h          | 11 +++++++++
+ meson.build                     |  1 -
+ src/d3d11/d3d11_context_imm.cpp |  3 ++-
+ src/d3d11/d3d11_device.cpp      |  7 ++----
+ src/d3d9/d3d9_device.cpp        |  1 +
+ src/dxvk/dxvk_context.cpp       | 44 ++++++++++++++++++++++-----------
+ src/dxvk/dxvk_context.h         | 12 +++++++--
+ src/dxvk/dxvk_cs.cpp            | 20 ++++++++++++---
+ src/dxvk/dxvk_cs.h              |  8 ++++++
+ src/dxvk/dxvk_lfx2.cpp          |  2 ++
+ src/dxvk/dxvk_lfx2.h            |  2 ++
+ 11 files changed, 84 insertions(+), 27 deletions(-)
+
+diff --git a/include/latencyflex2.h b/include/latencyflex2.h
+index 9e8d1536..bda252c5 100644
+--- a/include/latencyflex2.h
++++ b/include/latencyflex2.h
+@@ -54,6 +54,7 @@ typedef struct lfx2Dx12SubmitAux {
+ #endif
+ 
+ typedef uint64_t lfx2Timestamp;
++typedef uint64_t lfx2Interval;
+ 
+ typedef uint32_t lfx2SectionId;
+ 
+@@ -114,6 +115,16 @@ void lfx2MarkSection(struct lfx2Frame *frame,
+                      enum lfx2MarkType mark_type,
+                      lfx2Timestamp timestamp);
+ 
++LFX2_API
++void lfx2FrameOverrideQueuingDelay(struct lfx2Frame *frame,
++                                   lfx2SectionId section_id,
++                                   lfx2Interval queueing_delay);
++
++LFX2_API
++void lfx2FrameOverrideInverseThroughput(struct lfx2Frame *frame,
++                                        lfx2SectionId section_id,
++                                        lfx2Interval inverse_throughput);
++
+ LFX2_API struct lfx2ImplicitContext *lfx2ImplicitContextCreate(void);
+ 
+ LFX2_API void lfx2ImplicitContextRelease(struct lfx2ImplicitContext *context);
+diff --git a/meson.build b/meson.build
+index b571729d..31cc7e0d 100644
+--- a/meson.build
++++ b/meson.build
+@@ -60,7 +60,6 @@ if platform == 'windows'
+   # Wine's built-in back traces only work with dwarf4 symbols
+   if get_option('debug')
+     compiler_args += [
+-      '-gdwarf-4',
+     ]
+   endif
+ 
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index 767956c2..bdab28c9 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -843,7 +843,7 @@ namespace dxvk {
+ 
+     EmitCs<false>([] (DxvkContext* ctx) {
+       ctx->endFrame();
+-      ctx->endLfx2Frame();
++      ctx->endLfx2FrameImplicit();
+     });
+   }
+ 
+@@ -892,6 +892,7 @@ namespace dxvk {
+   
+   
+   void D3D11ImmediateContext::EmitCsChunk(DxvkCsChunkRef&& chunk) {
++    chunk->finalize();
+     m_csSeqNum = m_csThread.dispatchChunk(std::move(chunk));
+   }
+ 
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index ea39e6fe..f0ba640b 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -3460,8 +3460,7 @@ namespace dxvk {
+     auto frameWrapper = Lfx2Frame(m_dxvkDevice->lfx2(), static_cast<lfx2Frame *>(frame));
+ 
+     m_immediateContext->EmitCs([cDevice = m_dxvkDevice, frameWrapper] (DxvkContext* ctx) {
+-      auto &cLfx2 = cDevice->lfx2();
+-      cLfx2.VulkanContextBeginFrame(cDevice->getLfx2VkContext(), frameWrapper);
++      ctx->beginLfx2Frame(frameWrapper);
+     });
+   }
+ 
+@@ -3469,9 +3468,7 @@ namespace dxvk {
+     auto frameWrapper = Lfx2Frame(m_dxvkDevice->lfx2(), static_cast<lfx2Frame *>(frame));
+ 
+     m_immediateContext->EmitCs([cDevice = m_dxvkDevice, frameWrapper] (DxvkContext* ctx) {
+-      auto &cLfx2 = cDevice->lfx2();
+-      ctx->flushCommandList();
+-      cLfx2.VulkanContextEndFrame(cDevice->getLfx2VkContext(), frameWrapper);
++      ctx->endLfx2Frame();
+     });
+   }
+ }
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 732f818c..47d1405b 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -5093,6 +5093,7 @@ namespace dxvk {
+ 
+ 
+   void D3D9DeviceEx::EmitCsChunk(DxvkCsChunkRef&& chunk) {
++    chunk->finalize();
+     m_csSeqNum = m_csThread.dispatchChunk(std::move(chunk));
+   }
+ 
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 2f34e712..9353d5df 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -1,4 +1,5 @@
+ #include <cstring>
++#include <utility>
+ #include <vector>
+ #include <utility>
+ 
+@@ -6446,28 +6447,41 @@ namespace dxvk {
+     this->beginCurrentCommands();
+   }
+ 
+-  void DxvkContext::tryBeginLfx2Frame(bool critical) {
+-    if (m_type != DxvkContextType::Primary)
+-      Logger::err("beginLfx2Frame should only be called on immediate contexts");
++  void DxvkContext::tryBeginLfx2FrameImplicit(bool critical) {
+     if (!m_lfx2Frame) {
+-      m_lfx2Frame = m_device->getImplicitLfx2Context()->dequeueFrame(critical);
+-      if (m_lfx2Frame) {
+-        auto &cLfx2 = m_device->lfx2();
+-        cLfx2.VulkanContextBeginFrame(m_device->getLfx2VkContext(), m_lfx2Frame);
++      auto lfx2Frame = m_device->getImplicitLfx2Context()->dequeueFrame(critical);
++      if (lfx2Frame) {
++        beginLfx2Frame(lfx2Frame);
+       }
+     }
+   }
+ 
+-  void DxvkContext::endLfx2Frame() {
+-    if (m_type != DxvkContextType::Primary)
+-      Logger::err("endLfx2Frame should only be called on immediate contexts");
+-    tryBeginLfx2Frame(true);
++  void DxvkContext::endLfx2FrameImplicit() {
++    tryBeginLfx2FrameImplicit(true);
+     if (m_lfx2Frame) {
+-      flushCommandList();
+-      auto &cLfx2 = m_device->lfx2();
+-      cLfx2.VulkanContextEndFrame(m_device->getLfx2VkContext(), m_lfx2Frame);
+-      m_lfx2Frame = {};
++      endLfx2Frame();
+     }
+   }
+ 
++  void DxvkContext::beginLfx2Frame(Lfx2Frame frame) {
++    if (m_type != DxvkContextType::Primary)
++      Logger::err("beginLfx2Frame should only be called on immediate contexts");
++    auto &cLfx2 = m_device->lfx2();
++    m_lfx2Frame = std::move(frame);
++    cLfx2.VulkanContextBeginFrame(m_device->getLfx2VkContext(), m_lfx2Frame);
++    m_frameCsTime = 0;
++    m_minQueuingDelay = UINT64_MAX;
++  }
++
++  void DxvkContext::endLfx2Frame() {
++    if (m_type != DxvkContextType::Primary)
++      Logger::err("endLfx2Frame should only be called on immediate contexts");
++    flushCommandList();
++    auto &cLfx2 = m_device->lfx2();
++    cLfx2.VulkanContextEndFrame(m_device->getLfx2VkContext(), m_lfx2Frame);
++    cLfx2.FrameOverrideInverseThroughput(m_lfx2Frame, 800, m_frameCsTime);
++    if (m_minQueuingDelay != UINT64_MAX)
++      cLfx2.FrameOverrideQueuingDelay(m_lfx2Frame, 0, m_minQueuingDelay);
++    m_lfx2Frame = {};
++  }
+ }
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index b709edb6..a471fed8 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -68,7 +68,9 @@ namespace dxvk {
+      */
+     void flushCommandList(DxvkSubmitStatus* status);
+ 
+-    void tryBeginLfx2Frame(bool critical);
++    void tryBeginLfx2FrameImplicit(bool critical);
++    void endLfx2FrameImplicit();
++    void beginLfx2Frame(Lfx2Frame frame);
+     void endLfx2Frame();
+     
+     /**
+@@ -1391,6 +1393,11 @@ namespace dxvk {
+         m_cmd->addStatCtr(counter, value);
+     }
+ 
++    void recordChunkExecutionTiming(uint64_t duration, uint64_t queueingDelay) {
++      m_frameCsTime += duration;
++      m_minQueuingDelay = std::min(m_minQueuingDelay, queueingDelay);
++    }
++
+   private:
+     
+     Rc<DxvkDevice>          m_device;
+@@ -1436,6 +1443,8 @@ namespace dxvk {
+     std::array<DxvkComputePipeline*,   256> m_cpLookupCache = { };
+ 
+     Lfx2Frame m_lfx2Frame = {};
++    uint64_t m_frameCsTime = 0;
++    uint64_t m_minQueuingDelay = 0;
+ 
+     void blitImageFb(
+       const Rc<DxvkImage>&        dstImage,
+@@ -1743,7 +1752,6 @@ namespace dxvk {
+     void endCurrentCommands();
+ 
+     void splitCommands();
+-
+   };
+   
+ }
+diff --git a/src/dxvk/dxvk_cs.cpp b/src/dxvk/dxvk_cs.cpp
+index fe1f4c3a..44d7e718 100644
+--- a/src/dxvk/dxvk_cs.cpp
++++ b/src/dxvk/dxvk_cs.cpp
+@@ -55,8 +55,12 @@ namespace dxvk {
+ 
+     m_commandOffset = 0;
+   }
+-  
+-  
++
++  void DxvkCsChunk::finalize() {
++    m_queuedTimestamp = high_resolution_clock::now();
++  }
++
++
+   DxvkCsChunkPool::DxvkCsChunkPool() {
+     
+   }
+@@ -161,6 +165,8 @@ namespace dxvk {
+     // them in order to potentially reduce lock contention.
+     std::vector<DxvkCsChunkRef> chunks;
+ 
++    high_resolution_clock::time_point lastFinish;
++
+     try {
+       while (!m_stopped.load()) {
+         { std::unique_lock<dxvk::mutex> lock(m_mutex);
+@@ -175,8 +181,16 @@ namespace dxvk {
+ 
+         for (auto& chunk : chunks) {
+           m_context->addStatCtr(DxvkStatCounter::CsChunkCount, 1);
+-          m_context->tryBeginLfx2Frame(false);
++          m_context->tryBeginLfx2FrameImplicit(false);
++          high_resolution_clock::time_point start = high_resolution_clock::now();
+           chunk->executeAll(m_context.ptr());
++          high_resolution_clock::time_point end = high_resolution_clock::now();
++          m_context->recordChunkExecutionTiming(
++              std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count(),
++              std::max(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                  lastFinish - chunk->getQueuedTimestamp()).count(), 0LL)
++          );
++          lastFinish = end;
+ 
+           // Use a separate mutex for the chunk counter, this
+           // will only ever be contested if synchronization is
+diff --git a/src/dxvk/dxvk_cs.h b/src/dxvk/dxvk_cs.h
+index 589e5a8d..728d16f7 100644
+--- a/src/dxvk/dxvk_cs.h
++++ b/src/dxvk/dxvk_cs.h
+@@ -233,10 +233,18 @@ namespace dxvk {
+      * that it can be reused later.
+      */
+     void reset();
++
++    void finalize();
++
++    high_resolution_clock::time_point getQueuedTimestamp() {
++      return m_queuedTimestamp;
++    }
+     
+   private:
+     
+     size_t m_commandOffset = 0;
++
++    high_resolution_clock::time_point m_queuedTimestamp;
+     
+     DxvkCsCmd* m_head = nullptr;
+     DxvkCsCmd* m_tail = nullptr;
+diff --git a/src/dxvk/dxvk_lfx2.cpp b/src/dxvk/dxvk_lfx2.cpp
+index 23e20bb9..c7e50abe 100644
+--- a/src/dxvk/dxvk_lfx2.cpp
++++ b/src/dxvk/dxvk_lfx2.cpp
+@@ -31,6 +31,8 @@ namespace dxvk {
+     LOAD_PFN(FrameAddRef);
+     LOAD_PFN(FrameRelease);
+     LOAD_PFN(MarkSection);
++    LOAD_PFN(FrameOverrideQueuingDelay);
++    LOAD_PFN(FrameOverrideInverseThroughput);
+     LOAD_PFN(SleepUntil);
+     LOAD_PFN(TimestampNow);
+ #ifdef _WIN32
+diff --git a/src/dxvk/dxvk_lfx2.h b/src/dxvk/dxvk_lfx2.h
+index e6ae73df..dc81d0a5 100644
+--- a/src/dxvk/dxvk_lfx2.h
++++ b/src/dxvk/dxvk_lfx2.h
+@@ -21,6 +21,8 @@ namespace dxvk {
+     DECLARE_PFN(FrameAddRef);
+     DECLARE_PFN(FrameRelease);
+     DECLARE_PFN(MarkSection);
++    DECLARE_PFN(FrameOverrideQueuingDelay);
++    DECLARE_PFN(FrameOverrideInverseThroughput);
+     DECLARE_PFN(SleepUntil);
+     DECLARE_PFN(TimestampNow);
+ #ifdef _WIN32
+-- 
+2.43.0
+
+
+From a899eaeab2bd676ee982c01e843af3f16e1a974c Mon Sep 17 00:00:00 2001
+From: FakeMichau <49685661+FakeMichau@users.noreply.github.com>
+Date: Tue, 16 Jan 2024 18:15:48 +0100
+Subject: [PATCH 12/12] Update for upstream changes
+
+---
+ src/dxvk/dxvk_context.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 9353d5df..7c6f6678 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -6476,7 +6476,8 @@ namespace dxvk {
+   void DxvkContext::endLfx2Frame() {
+     if (m_type != DxvkContextType::Primary)
+       Logger::err("endLfx2Frame should only be called on immediate contexts");
+-    flushCommandList();
++    auto status = new DxvkSubmitStatus;
++    flushCommandList(status);
+     auto &cLfx2 = m_device->lfx2();
+     cLfx2.VulkanContextEndFrame(m_device->getLfx2VkContext(), m_lfx2Frame);
+     cLfx2.FrameOverrideInverseThroughput(m_lfx2Frame, 800, m_frameCsTime);
+-- 
+2.43.0
+

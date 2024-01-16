@@ -3,6 +3,10 @@ Disclaimer
 
 For basic info about Proton, usage and compilation read [Valve's README](https://github.com/ValveSoftware/Proton/blob/bleeding-edge/README.md#install-proton-locally)
 
+Make sure to apply patches before compiling my running
+
+`./patches/apply-patches.sh`
+
 
 Introduction
 ------------
@@ -15,7 +19,7 @@ Speaking of streamline - Proton-LFX2 also attempts to bypass [Streamline](https:
 LatencyFlex 2
 ------------
 
-Main reason why this fork was created. Add you need to do is add
+Main reason why this fork was created. All you need to do is to add
 
 `LFX2=1`
 
