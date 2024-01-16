@@ -1027,6 +1027,19 @@ class CompatData:
                     else:
                         sys.stderr.write("Upscaler: Folder " + upscaler_to_use + " doesn't exist" + os.linesep)
                     sys.stderr.flush()
+                else:
+                    files_to_remove = []
+                    if os.path.exists(g_proton.upscalers_dir):
+                        upscalers = os.listdir(g_proton.upscalers_dir)
+                        for upscaler in upscalers:
+                            upscaler = os.path.join(g_proton.upscalers_dir, upscaler)
+                            for file in os.listdir(upscaler):
+                                files_to_remove.append(file)
+                    files_to_remove = list(set(files_to_remove))
+                    for file in files_to_remove:
+                        path_to_remove = self.prefix_dir + "drive_c/windows/system32/" + file
+                        if file_exists(path_to_remove, follow_symlinks=False):
+                            os.unlink(path_to_remove)
 
 
             setup_game_dir_drive()
