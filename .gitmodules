@@ -3,7 +3,7 @@
 	url = https://github.com/ValveSoftware/wine
 [submodule "dxvk"]
 	path = dxvk
-	url = https://github.com/FakeMichau/dxvk.git
+	url = https://github.com/doitsujin/dxvk.git
 [submodule "openvr"]
 	path = openvr
 	url = https://github.com/ValveSoftware/openvr
@@ -24,7 +24,7 @@
 	url = https://github.com/GStreamer/orc.git
 [submodule "vkd3d-proton"]
 	path = vkd3d-proton
-	url = https://github.com/FakeMichau/vkd3d-proton
+	url = https://github.com/HansKristian-Work/vkd3d-proton.git
 [submodule "OpenXR-SDK"]
 	path = OpenXR-SDK
 	url = https://github.com/KhronosGroup/OpenXR-SDK
