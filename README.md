@@ -3,7 +3,7 @@ Disclaimer
 
 For basic info about Proton, usage and compilation read [Valve's README](https://github.com/ValveSoftware/Proton/blob/bleeding-edge/README.md#install-proton-locally)
 
-Make sure to apply patches before compiling my running
+Make sure to apply patches before compiling by running
 
 `./patches/apply-patches.sh`
 
