@@ -1,0 +1,939 @@
+From 68de9614166e3df3174c1f2b41f3eb94fb66792e Mon Sep 17 00:00:00 2001
+From: FakeMichau <49685661+FakeMichau@users.noreply.github.com>
+Date: Mon, 2 Oct 2023 14:50:19 +0200
+Subject: [PATCH 1/3] LFX2 support and gpu spoofing
+
+---
+ inc/latencyflex2.h             |  83 ++++++++++++++++
+ src/d3d/lfx2.cpp               | 176 +++++++++++++++++++++++++++++++++
+ src/d3d/lfx2.h                 |  60 +++++++++++
+ src/d3d/nvapi_d3d_instance.cpp |  33 +++++--
+ src/d3d/nvapi_d3d_instance.h   |   9 +-
+ src/dxvk/dxvk_interfaces.cpp   |   1 +
+ src/dxvk/dxvk_interfaces.h     |  13 +++
+ src/meson.build                |   1 +
+ src/nvapi_d3d.cpp              |  28 ++++--
+ src/nvapi_gpu.cpp              |  73 +-------------
+ src/resource_factory.cpp       |   4 +-
+ src/resource_factory.h         |   4 +-
+ 12 files changed, 395 insertions(+), 90 deletions(-)
+ create mode 100644 inc/latencyflex2.h
+ create mode 100644 src/d3d/lfx2.cpp
+ create mode 100644 src/d3d/lfx2.h
+
+diff --git a/inc/latencyflex2.h b/inc/latencyflex2.h
+new file mode 100644
+index 0000000..02767c5
+--- /dev/null
++++ b/inc/latencyflex2.h
+@@ -0,0 +1,83 @@
++#ifndef LATENCYFLEX2_H
++#define LATENCYFLEX2_H
++
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdlib.h>
++#ifdef _WIN32
++#define LFX2_API __declspec(dllimport)
++#else
++#define LFX2_API
++#endif
++
++typedef enum lfx2MarkType {
++    lfx2MarkTypeBegin,
++    lfx2MarkTypeEnd,
++} lfx2MarkType;
++
++typedef struct lfx2Context lfx2Context;
++
++/**
++ * A write handle for frame markers.
++ */
++typedef struct lfx2Frame lfx2Frame;
++
++typedef struct lfx2ImplicitContext lfx2ImplicitContext;
++
++typedef uint64_t lfx2Timestamp;
++
++typedef uint32_t lfx2SectionId;
++
++#ifdef __cplusplus
++extern "C" {
++#endif // __cplusplus
++
++    LFX2_API lfx2Timestamp lfx2TimestampNow(void);
++
++#if defined(_WIN32)
++    LFX2_API lfx2Timestamp lfx2TimestampFromQpc(uint64_t qpc);
++#endif
++
++    LFX2_API void lfx2SleepUntil(lfx2Timestamp target);
++
++    LFX2_API struct lfx2Context* lfx2ContextCreate(void);
++
++    LFX2_API void lfx2ContextAddRef(struct lfx2Context* context);
++
++    LFX2_API void lfx2ContextRelease(struct lfx2Context* context);
++
++    LFX2_API
++    struct lfx2Frame* lfx2FrameCreate(struct lfx2Context* context,
++        lfx2Timestamp* out_timestamp);
++
++    LFX2_API void lfx2FrameAddRef(struct lfx2Frame* frame);
++
++    LFX2_API void lfx2FrameRelease(struct lfx2Frame* frame);
++
++    LFX2_API
++    void lfx2MarkSection(struct lfx2Frame* frame,
++        lfx2SectionId section_id,
++        enum lfx2MarkType mark_type,
++        lfx2Timestamp timestamp);
++
++    LFX2_API struct lfx2ImplicitContext* lfx2ImplicitContextCreate(void);
++
++    LFX2_API void lfx2ImplicitContextRelease(struct lfx2ImplicitContext* context);
++
++    LFX2_API void lfx2ImplicitContextReset(struct lfx2ImplicitContext* context);
++
++    LFX2_API
++    struct lfx2Frame* lfx2FrameCreateImplicit(struct lfx2ImplicitContext* context,
++        lfx2Timestamp* out_timestamp);
++
++    LFX2_API
++    struct lfx2Frame* lfx2FrameDequeueImplicit(struct lfx2ImplicitContext* context,
++        bool critical);
++
++#ifdef __cplusplus
++} // extern "C"
++#endif // __cplusplus
++
++#endif /* LATENCYFLEX2_H */
+diff --git a/src/d3d/lfx2.cpp b/src/d3d/lfx2.cpp
+new file mode 100644
+index 0000000..b75cf0d
+--- /dev/null
++++ b/src/d3d/lfx2.cpp
+@@ -0,0 +1,176 @@
++#include "lfx2.h"
++#include "util/util_log.h"
++#include "util/util_string.h"
++
++namespace dxvk {
++
++    Lfx2::Lfx2() {
++        const auto lfxModuleName = "latencyflex2_rust.dll";
++
++        m_lfxModule = ::LoadLibraryA(lfxModuleName);
++        if (m_lfxModule == nullptr) {
++            auto lastError = ::GetLastError();
++            if (lastError != ERROR_MOD_NOT_FOUND) // Ignore library not found
++                log::write(str::format("Loading ", lfxModuleName,
++                    " failed with error code: ", lastError));
++            return;
++        }
++
++#define LOAD_PFN(x) \
++    this->x = GetProcAddress<decltype(&::lfx2##x)>("lfx2" #x)
++
++        LOAD_PFN(ContextCreate);
++        LOAD_PFN(ContextAddRef);
++        LOAD_PFN(ContextRelease);
++        LOAD_PFN(FrameCreate);
++        LOAD_PFN(FrameAddRef);
++        LOAD_PFN(FrameRelease);
++        LOAD_PFN(MarkSection);
++        LOAD_PFN(SleepUntil);
++        LOAD_PFN(TimestampNow);
++#ifdef _WIN32
++        LOAD_PFN(TimestampFromQpc);
++#endif
++        LOAD_PFN(ImplicitContextCreate);
++        LOAD_PFN(ImplicitContextRelease);
++        LOAD_PFN(ImplicitContextReset);
++        LOAD_PFN(FrameCreateImplicit);
++        LOAD_PFN(FrameDequeueImplicit);
++
++#undef LOAD_PFN
++    }
++
++    Lfx2::~Lfx2() {
++        if (m_lfxModule == nullptr)
++            return;
++
++        if (m_nextFrame)
++            FrameRelease(m_nextFrame);
++
++        if (m_lfxContext)
++            ContextRelease(m_lfxContext);
++
++        ::FreeLibrary(m_lfxModule);
++    }
++
++    bool Lfx2::IsAvailable() const {
++        return m_lfxModule != nullptr;
++    }
++
++    void Lfx2::Sleep() {
++        std::unique_lock<std::mutex> lock(m_frameMapMutex);
++        if (m_lfxContext && !m_nextFrame) {
++            lfx2Timestamp sleepTarget;
++            m_nextFrame = FrameCreate(m_lfxContext, &sleepTarget);
++            lock.unlock();
++
++            SleepUntil(sleepTarget);
++        }
++        // Else: Sleep was called without recording frame timing, skip
++    }
++
++    void Lfx2::Mark(uint64_t frame_id, NV_LATENCY_MARKER_TYPE type, Com<ID3DLfx2ExtDevice>& extDevice) {
++        if (!m_lfxContext)
++            return;
++
++        uint32_t section;
++        lfx2MarkType markType;
++        switch (type) {
++            case SIMULATION_START:
++                section = 0;
++                markType = lfx2MarkType::lfx2MarkTypeBegin;
++                break;
++            case SIMULATION_END:
++                section = 0;
++                markType = lfx2MarkType::lfx2MarkTypeEnd;
++                break;
++            case RENDERSUBMIT_START:
++                section = 500;
++                markType = lfx2MarkType::lfx2MarkTypeBegin;
++                break;
++            case RENDERSUBMIT_END:
++                section = 500;
++                markType = lfx2MarkType::lfx2MarkTypeEnd;
++                break;
++            default:
++                return;
++        }
++
++        std::unique_lock<std::mutex> lock(m_frameMapMutex);
++        lfx2Frame* frame;
++        if (type == SIMULATION_START) {
++            EnsureFrame();
++            m_frameMap[frame_id] = m_nextFrame;
++            m_callsExpectedByFrame[frame_id] = 4;
++            frame = m_nextFrame;
++            m_nextFrame = nullptr;
++
++            decltype(m_frameMap)::iterator it;
++            if (frame_id >= kMaxInflightFrames && (it = m_frameMap.upper_bound(frame_id - kMaxInflightFrames)) != m_frameMap.end()) {
++                for (auto i = m_frameMap.begin(); i != it;) {
++                    FrameRelease(i->second);
++                    m_callsExpectedByFrame.erase(i->first);
++                    i = m_frameMap.erase(i);
++                }
++            }
++        } else {
++            if (m_frameMap.find(frame_id) == m_frameMap.end())
++                return;
++            frame = m_frameMap[frame_id];
++        }
++        lock.unlock();
++
++        MarkSection(frame, section, markType, TimestampNow());
++
++        if (extDevice.ptr()) {
++            if (type == RENDERSUBMIT_START) {
++                extDevice->MarkRenderStart((void*)frame);
++            } else if (type == RENDERSUBMIT_END) {
++                extDevice->MarkRenderEnd((void*)frame);
++            }
++        }
++
++        lock.lock();
++        if (--m_callsExpectedByFrame[frame_id] == 0) {
++            FrameRelease(frame);
++            m_frameMap.erase(frame_id);
++            m_callsExpectedByFrame.erase(frame_id);
++        }
++    }
++
++    void Lfx2::EnsureFrame() {
++        if (!m_nextFrame) {
++            lfx2Timestamp sleepTarget;
++            m_nextFrame = FrameCreate(m_lfxContext, &sleepTarget);
++        }
++    }
++
++    void Lfx2::SleepImplicit(Com<ID3DLfx2ExtDevice>& extDevice) {
++        lfx2Timestamp sleepTarget;
++        lfx2Frame* implicitFrame;
++        extDevice->ImplicitBeginFrame(&sleepTarget, reinterpret_cast<void**>(&implicitFrame));
++
++        SleepUntil(sleepTarget);
++        MarkSection(implicitFrame, 0, lfx2MarkType::lfx2MarkTypeBegin, TimestampNow());
++        MarkSection(implicitFrame, 0, lfx2MarkType::lfx2MarkTypeEnd, TimestampNow());
++        FrameRelease(implicitFrame);
++    }
++
++    void Lfx2::SetEnabled(bool enabled) {
++        if (enabled && !m_lfxContext) {
++            m_lfxContext = ContextCreate();
++        } else if (!enabled && m_lfxContext) {
++            if (m_nextFrame) {
++                FrameRelease(m_nextFrame);
++                m_nextFrame = nullptr;
++            }
++            ContextRelease(m_lfxContext);
++            m_lfxContext = nullptr;
++        }
++    }
++
++    template <typename T>
++    T Lfx2::GetProcAddress(const char* name) {
++        return reinterpret_cast<T>(reinterpret_cast<void*>(::GetProcAddress(m_lfxModule, name)));
++    }
++}
+\ No newline at end of file
+diff --git a/src/d3d/lfx2.h b/src/d3d/lfx2.h
+new file mode 100644
+index 0000000..2e20ad7
+--- /dev/null
++++ b/src/d3d/lfx2.h
+@@ -0,0 +1,60 @@
++#pragma once
++
++#include "../inc/latencyflex2.h"
++#include "../nvapi_private.h"
++#include "dxvk/dxvk_interfaces.h"
++#include "util/com_pointer.h"
++#include "vkd3d-proton/vkd3d-proton_interfaces.h"
++
++namespace dxvk {
++    class Lfx2 {
++      public:
++        Lfx2();
++        virtual ~Lfx2();
++
++        [[nodiscard]] virtual bool IsAvailable() const;
++        virtual void Sleep();
++        virtual void SleepImplicit(Com<ID3DLfx2ExtDevice>& extDevice);
++        virtual void Mark(uint64_t frame_id, NV_LATENCY_MARKER_TYPE type, Com<ID3DLfx2ExtDevice>& extDevice);
++        virtual void SetEnabled(bool enabled);
++
++      private:
++#define DECLARE_PFN(x) \
++    decltype(&::lfx2##x) x {}
++
++        DECLARE_PFN(ContextCreate);
++        DECLARE_PFN(ContextAddRef);
++        DECLARE_PFN(ContextRelease);
++        DECLARE_PFN(FrameCreate);
++        DECLARE_PFN(FrameAddRef);
++        DECLARE_PFN(FrameRelease);
++        DECLARE_PFN(MarkSection);
++        DECLARE_PFN(SleepUntil);
++        DECLARE_PFN(TimestampNow);
++#ifdef _WIN32
++        DECLARE_PFN(TimestampFromQpc);
++#endif
++        DECLARE_PFN(ImplicitContextCreate);
++        DECLARE_PFN(ImplicitContextRelease);
++        DECLARE_PFN(ImplicitContextReset);
++        DECLARE_PFN(FrameCreateImplicit);
++        DECLARE_PFN(FrameDequeueImplicit);
++
++#undef DECLARE_PFN
++
++        template <typename T>
++        T GetProcAddress(const char* name);
++
++        void EnsureFrame();
++
++        std::mutex m_frameMapMutex;
++        std::map<uint64_t, lfx2Frame*> m_frameMap;
++        std::unordered_map<uint64_t, uint32_t> m_callsExpectedByFrame;
++
++        HMODULE m_lfxModule{};
++        lfx2Context* m_lfxContext{};
++        lfx2Frame* m_nextFrame{};
++
++        static constexpr uint64_t kMaxInflightFrames = 64;
++    };
++}
+\ No newline at end of file
+diff --git a/src/d3d/nvapi_d3d_instance.cpp b/src/d3d/nvapi_d3d_instance.cpp
+index 6cdf260..1685953 100644
+--- a/src/d3d/nvapi_d3d_instance.cpp
++++ b/src/d3d/nvapi_d3d_instance.cpp
+@@ -1,9 +1,13 @@
+ #include "../util/util_log.h"
+ #include "nvapi_d3d_instance.h"
++#include "util/util_env.h"
+ 
+ namespace dxvk {
+     NvapiD3dInstance::NvapiD3dInstance(ResourceFactory& resourceFactory)
+-        : m_resourceFactory(resourceFactory) {}
++        : m_resourceFactory(resourceFactory) {
++        auto latencyMarkersEnv = env::getEnvVariable("DXVK_NVAPI_USE_LATENCY_MARKERS");
++        m_useLatencyMarkers = latencyMarkersEnv.empty() || latencyMarkersEnv != "0";
++    }
+ 
+     NvapiD3dInstance::~NvapiD3dInstance() = default;
+ 
+@@ -17,21 +21,36 @@ namespace dxvk {
+         return m_lfx->IsAvailable();
+     }
+ 
++    Lfx2* NvapiD3dInstance::GetLfx2Instance() const {
++        return &*m_lfx;
++    }
++
+     bool NvapiD3dInstance::IsReflexEnabled() const {
+         return m_isLfxEnabled;
+     }
+ 
+     void NvapiD3dInstance::SetReflexEnabled(bool value) {
+         m_isLfxEnabled = value;
++        m_lfx->SetEnabled(value);
+     }
+ 
+-    void NvapiD3dInstance::Sleep() {
+-        if (m_isLfxEnabled)
+-            m_lfx->WaitAndBeginFrame();
++    bool NvapiD3dInstance::UseLatencyMarkers() const {
++        return m_useLatencyMarkers;
+     }
+ 
+-    void NvapiD3dInstance::SetTargetFrameTime(uint64_t frameTimeUs) {
+-        constexpr uint64_t kNanoInMicro = 1000;
+-        m_lfx->SetTargetFrameTime(frameTimeUs * kNanoInMicro);
++    Com<ID3DLfx2ExtDevice> NvapiD3dInstance::GetLfx2DeviceExt(IUnknown* pDevice) {
++        static std::mutex map_mutex;
++        static std::unordered_map<IUnknown*, ID3DLfx2ExtDevice*> cacheMap;
++
++        std::scoped_lock lock(map_mutex);
++        auto it = cacheMap.find(pDevice);
++        if (it != cacheMap.end())
++            return it->second;
++        Com<ID3DLfx2ExtDevice> lfx2Device;
++        if (FAILED(pDevice->QueryInterface(IID_PPV_ARGS(&lfx2Device))))
++            lfx2Device = nullptr;
++
++        cacheMap.emplace(pDevice, lfx2Device.ptr());
++        return lfx2Device;
+     }
+ }
+\ No newline at end of file
+diff --git a/src/d3d/nvapi_d3d_instance.h b/src/d3d/nvapi_d3d_instance.h
+index 5a22371..2d5de3a 100644
+--- a/src/d3d/nvapi_d3d_instance.h
++++ b/src/d3d/nvapi_d3d_instance.h
+@@ -13,12 +13,15 @@ namespace dxvk {
+         [[nodiscard]] bool IsReflexAvailable();
+         [[nodiscard]] bool IsReflexEnabled() const;
+         void SetReflexEnabled(bool value);
+-        void Sleep();
+-        void SetTargetFrameTime(uint64_t frameTimeUs);
++        [[nodiscard]] bool UseLatencyMarkers() const;
++        [[nodiscard]] Lfx2* GetLfx2Instance() const;
++
++        Com<ID3DLfx2ExtDevice> GetLfx2DeviceExt(IUnknown* pDevice);
+ 
+       private:
+         ResourceFactory& m_resourceFactory;
+-        std::unique_ptr<Lfx> m_lfx;
++        std::unique_ptr<Lfx2> m_lfx;
+         bool m_isLfxEnabled = false;
++        bool m_useLatencyMarkers;
+     };
+ }
+\ No newline at end of file
+diff --git a/src/dxvk/dxvk_interfaces.cpp b/src/dxvk/dxvk_interfaces.cpp
+index 734fb75..aefd64a 100644
+--- a/src/dxvk/dxvk_interfaces.cpp
++++ b/src/dxvk/dxvk_interfaces.cpp
+@@ -5,5 +5,6 @@ const GUID IDXGIVkInteropFactory1::guid = {0x2a289dbd, 0x2d0a, 0x4a51, {0x89, 0x
+ const GUID IDXGIVkInteropAdapter::guid = {0x3a6d8f2c, 0xb0e8, 0x4ab4, {0xb4, 0xdc, 0x4f, 0xd2, 0x48, 0x91, 0xbf, 0xa5}};
+ const GUID ID3D11VkExtDevice::guid = {0x8a6e3c42, 0xf74c, 0x45b7, {0x82, 0x65, 0xa2, 0x31, 0xb6, 0x77, 0xca, 0x17}};
+ const GUID ID3D11VkExtDevice1::guid = {0xcfcf64ef, 0x9586, 0x46d0, {0xbc, 0xa4, 0x97, 0xcf, 0x2c, 0xa6, 0x1b, 0x06}};
++const GUID ID3DLfx2ExtDevice::guid = {0x851a9f0f, 0x5da0, 0x4850, {0xb5, 0x63, 0xa7, 0xbb, 0xc4, 0x14, 0xf4, 0xe6}};
+ const GUID ID3D11VkExtContext::guid = {0xfd0bca13, 0x5cb6, 0x4c3a, {0x98, 0x7e, 0x47, 0x50, 0xde, 0x2c, 0xa7, 0x91}};
+ const GUID ID3D11VkExtContext1::guid = {0x874b09b2, 0xae0b, 0x41d8, {0x84, 0x76, 0x5f, 0x3b, 0x7a, 0x0e, 0x87, 0x9d}};
+diff --git a/src/dxvk/dxvk_interfaces.h b/src/dxvk/dxvk_interfaces.h
+index 98976b6..2063e54 100644
+--- a/src/dxvk/dxvk_interfaces.h
++++ b/src/dxvk/dxvk_interfaces.h
+@@ -17,6 +17,7 @@ enum D3D11_VK_EXTENSION : uint32_t {
+     D3D11_VK_EXT_BARRIER_CONTROL = 3,
+     D3D11_VK_NVX_BINARY_IMPORT = 4,
+     D3D11_VK_NVX_IMAGE_VIEW_HANDLE = 5,
++    D3D11_VK_LATENCYFLEX2 = 6,
+ };
+ 
+ enum D3D11_VK_BARRIER_CONTROL : uint32_t {
+@@ -117,6 +118,17 @@ ID3D11VkExtDevice1 : public ID3D11VkExtDevice {
+         uint32_t * pCudaTextureHandle) = 0;
+ };
+ 
++MIDL_INTERFACE("851a9f0f-5da0-4850-b563-a7bbc414f4e6")
++ID3DLfx2ExtDevice : public IUnknown {
++    static const GUID guid;
++
++    virtual void STDMETHODCALLTYPE MarkRenderStart(void* frame) = 0;
++
++    virtual void STDMETHODCALLTYPE MarkRenderEnd(void* frame) = 0;
++
++    virtual void STDMETHODCALLTYPE ImplicitBeginFrame(uint64_t * outTimestamp, void* outFrame) = 0;
++};
++
+ MIDL_INTERFACE("fd0bca13-5cb6-4c3a-987e-4750de2ca791")
+ ID3D11VkExtContext : public IUnknown {
+     static const GUID guid;
+@@ -193,5 +205,6 @@ DXVK_DEFINE_GUID(IDXGIVkInteropFactory1)
+ DXVK_DEFINE_GUID(IDXGIVkInteropAdapter)
+ DXVK_DEFINE_GUID(ID3D11VkExtDevice)
+ DXVK_DEFINE_GUID(ID3D11VkExtDevice1)
++DXVK_DEFINE_GUID(ID3DLfx2ExtDevice)
+ DXVK_DEFINE_GUID(ID3D11VkExtContext)
+ DXVK_DEFINE_GUID(ID3D11VkExtContext1)
+diff --git a/src/meson.build b/src/meson.build
+index 98410c0..1b4f83f 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -11,6 +11,7 @@ nvapi_src = files([
+   'sysinfo/nvapi_adapter_registry.cpp',
+   'resource_factory.cpp',
+   'd3d/lfx.cpp',
++  'd3d/lfx2.cpp',
+   'd3d/nvapi_d3d_instance.cpp',
+   'd3d11/nvapi_d3d11_device.cpp',
+   'd3d12/nvapi_d3d12_device.cpp',
+diff --git a/src/nvapi_d3d.cpp b/src/nvapi_d3d.cpp
+index 7f1168b..dfed404 100644
+--- a/src/nvapi_d3d.cpp
++++ b/src/nvapi_d3d.cpp
+@@ -1,6 +1,8 @@
+ #include "nvapi_private.h"
+ #include "nvapi_globals.h"
+ #include "util/util_statuscode.h"
++#include "dxvk/dxvk_interfaces.h"
++#include "d3d12/nvapi_d3d12_device.h"
+ 
+ extern "C" {
+     using namespace dxvk;
+@@ -115,7 +117,13 @@ extern "C" {
+         if (!nvapiD3dInstance->IsReflexAvailable())
+             return NoImplementation(n, alreadyLoggedNoLfx);
+ 
+-        nvapiD3dInstance->Sleep();
++        nvapiD3dInstance->GetLfx2Instance()->Sleep();
++        if (nvapiD3dInstance->IsReflexEnabled() && !nvapiD3dInstance->UseLatencyMarkers()) {
++            auto lfx2Ext = nvapiD3dInstance->GetLfx2DeviceExt(pDevice);
++            if (lfx2Ext.ptr()) {
++                nvapiD3dInstance->GetLfx2Instance()->SleepImplicit(lfx2Ext);
++            }
++        }
+ 
+         return Ok(n, alreadyLoggedOk);
+     }
+@@ -124,6 +132,10 @@ extern "C" {
+         constexpr auto n = __func__;
+         static bool alreadyLoggedNoLfx = false;
+ 
++        Com<ID3DLfx2ExtDevice> context = nvapiD3dInstance->GetLfx2DeviceExt(pDevice);
++        if (!context.ptr())
++            return NoImplementation(n, alreadyLoggedNoLfx);
++
+         if (nvapiAdapterRegistry == nullptr)
+             return ApiNotInitialized(n);
+ 
+@@ -134,10 +146,7 @@ extern "C" {
+             return NoImplementation(n, alreadyLoggedNoLfx);
+ 
+         nvapiD3dInstance->SetReflexEnabled(pSetSleepModeParams->bLowLatencyMode);
+-        if (pSetSleepModeParams->bLowLatencyMode)
+-            nvapiD3dInstance->SetTargetFrameTime(pSetSleepModeParams->minimumIntervalUs);
+-
+-        return Ok(str::format(n, " (", pSetSleepModeParams->bLowLatencyMode ? (str::format("Enabled/", pSetSleepModeParams->minimumIntervalUs, "us")) : "Disabled", ")"));
++        return Ok(str::format(n, " (", pSetSleepModeParams->bLowLatencyMode ? str::format("Enabled/", pSetSleepModeParams->minimumIntervalUs, "us") : "Disabled", ")"));
+     }
+ 
+     NvAPI_Status __cdecl NvAPI_D3D_GetSleepStatus(IUnknown* pDevice, NV_GET_SLEEP_STATUS_PARAMS* pGetSleepStatusParams) {
+@@ -164,6 +173,13 @@ extern "C" {
+ 
+     NvAPI_Status __cdecl NvAPI_D3D_SetLatencyMarker(IUnknown* pDev, NV_LATENCY_MARKER_PARAMS* pSetLatencyMarkerParams) {
+         static bool alreadyLogged = false;
+-        return NoImplementation(__func__, alreadyLogged);
++        if (pSetLatencyMarkerParams->version != NV_LATENCY_MARKER_PARAMS_VER1)
++            return IncompatibleStructVersion(__func__);
++
++        Com<ID3DLfx2ExtDevice> context = nvapiD3dInstance->GetLfx2DeviceExt(pDev);
++        Lfx2* lfx2 = nvapiD3dInstance->GetLfx2Instance();
++        lfx2->Mark(pSetLatencyMarkerParams->frameID, pSetLatencyMarkerParams->markerType, context);
++
++        return Ok(__func__, alreadyLogged);
+     }
+ }
+diff --git a/src/nvapi_gpu.cpp b/src/nvapi_gpu.cpp
+index 97d3a10..772985f 100644
+--- a/src/nvapi_gpu.cpp
++++ b/src/nvapi_gpu.cpp
+@@ -367,77 +367,10 @@ extern "C" {
+ 
+     NvAPI_Status __cdecl NvAPI_GPU_GetArchInfo(NvPhysicalGpuHandle hPhysicalGpu, NV_GPU_ARCH_INFO* pGpuArchInfo) {
+         constexpr auto n = __func__;
+-        auto returnAddress = _ReturnAddress();
+ 
+-        if (nvapiAdapterRegistry == nullptr)
+-            return ApiNotInitialized(n);
+-
+-        if (pGpuArchInfo == nullptr)
+-            return InvalidArgument(n);
+-
+-        auto adapter = reinterpret_cast<NvapiAdapter*>(hPhysicalGpu);
+-        if (!nvapiAdapterRegistry->IsAdapter(adapter))
+-            return ExpectedPhysicalGpuHandle(n);
+-
+-        if (pGpuArchInfo->version != NV_GPU_ARCH_INFO_VER_1 && pGpuArchInfo->version != NV_GPU_ARCH_INFO_VER_2)
+-            return IncompatibleStructVersion(n);
+-
+-        auto architectureId = adapter->GetArchitectureId();
+-
+-        if (env::needsAmpereSpoofing(architectureId, returnAddress))
+-            architectureId = NV_GPU_ARCHITECTURE_GA100;
+-
+-        if (env::needsPascalSpoofing(architectureId))
+-            architectureId = NV_GPU_ARCHITECTURE_GP100;
+-
+-        // Assume the implementation ID from the architecture ID. No simple way
+-        // to do a more fine-grained query at this time. Would need wine-nvml
+-        // usage.
+-        NV_GPU_ARCH_IMPLEMENTATION_ID implementationId;
+-        switch (architectureId) {
+-            case NV_GPU_ARCHITECTURE_AD100:
+-                implementationId = NV_GPU_ARCH_IMPLEMENTATION_AD102;
+-                break;
+-            case NV_GPU_ARCHITECTURE_GA100:
+-                implementationId = NV_GPU_ARCH_IMPLEMENTATION_GA102;
+-                break;
+-            case NV_GPU_ARCHITECTURE_TU100:
+-                implementationId = NV_GPU_ARCH_IMPLEMENTATION_TU102;
+-                break;
+-            case NV_GPU_ARCHITECTURE_GV100:
+-                implementationId = NV_GPU_ARCH_IMPLEMENTATION_GV100;
+-                break;
+-            case NV_GPU_ARCHITECTURE_GP100:
+-                implementationId = NV_GPU_ARCH_IMPLEMENTATION_GP102;
+-                break;
+-            case NV_GPU_ARCHITECTURE_GM200:
+-                implementationId = NV_GPU_ARCH_IMPLEMENTATION_GM204;
+-                break;
+-            case NV_GPU_ARCHITECTURE_GK100:
+-                implementationId = NV_GPU_ARCH_IMPLEMENTATION_GK104;
+-                break;
+-            default:
+-                return Error(n);
+-        }
+-
+-        auto revisionId = NV_GPU_CHIP_REV_UNKNOWN;
+-
+-        switch (pGpuArchInfo->version) {
+-            case NV_GPU_ARCH_INFO_VER_1: {
+-                auto pGpuArchInfoV1 = reinterpret_cast<NV_GPU_ARCH_INFO_V1*>(pGpuArchInfo);
+-                pGpuArchInfoV1->architecture = architectureId;
+-                pGpuArchInfoV1->implementation = implementationId;
+-                pGpuArchInfoV1->revision = revisionId;
+-                break;
+-            }
+-            case NV_GPU_ARCH_INFO_VER_2:
+-                pGpuArchInfo->architecture_id = architectureId;
+-                pGpuArchInfo->implementation_id = implementationId;
+-                pGpuArchInfo->revision_id = revisionId;
+-                break;
+-            default:
+-                return Error(n); // Unreachable, but just to be sure
+-        }
++        pGpuArchInfo->architecture_id = NV_GPU_ARCHITECTURE_AD100;
++        pGpuArchInfo->implementation_id = NV_GPU_ARCH_IMPLEMENTATION_AD102;
++        pGpuArchInfo->revision_id = NV_GPU_CHIP_REV_UNKNOWN;
+ 
+         return Ok(n);
+     }
+diff --git a/src/resource_factory.cpp b/src/resource_factory.cpp
+index ce9a7d9..40c8295 100644
+--- a/src/resource_factory.cpp
++++ b/src/resource_factory.cpp
+@@ -37,7 +37,7 @@ namespace dxvk {
+         return std::make_unique<Nvml>();
+     }
+ 
+-    std::unique_ptr<Lfx> ResourceFactory::CreateLfx() {
+-        return std::make_unique<Lfx>();
++    std::unique_ptr<Lfx2> ResourceFactory::CreateLfx() {
++        return std::make_unique<Lfx2>();
+     }
+ }
+diff --git a/src/resource_factory.h b/src/resource_factory.h
+index eebfbcd..69c2384 100644
+--- a/src/resource_factory.h
++++ b/src/resource_factory.h
+@@ -4,7 +4,7 @@
+ #include "util/com_pointer.h"
+ #include "sysinfo/vulkan.h"
+ #include "sysinfo/nvml.h"
+-#include "d3d/lfx.h"
++#include "d3d/lfx2.h"
+ 
+ namespace dxvk {
+     class ResourceFactory {
+@@ -16,6 +16,6 @@ namespace dxvk {
+         virtual Com<IDXGIFactory1> CreateDXGIFactory1();
+         virtual std::unique_ptr<Vulkan> CreateVulkan(Com<IDXGIFactory1>& dxgiFactory);
+         virtual std::unique_ptr<Nvml> CreateNvml();
+-        virtual std::unique_ptr<Lfx> CreateLfx();
++        virtual std::unique_ptr<Lfx2> CreateLfx();
+     };
+ }
+-- 
+2.43.0
+
+
+From 7004a81746a35b8dc13301431772dbbc36e10fcd Mon Sep 17 00:00:00 2001
+From: FakeMichau <49685661+FakeMichau@users.noreply.github.com>
+Date: Sat, 7 Oct 2023 15:12:55 +0200
+Subject: [PATCH 2/3] Remove incomplete support for the first latencyflex
+
+---
+ src/d3d/lfx.cpp         | 67 -----------------------------------------
+ src/d3d/lfx.h           | 26 ----------------
+ src/meson.build         |  1 -
+ tests/meson.build       |  1 -
+ tests/mock_factory.h    |  5 ---
+ tests/nvapi_d3d_mocks.h |  7 -----
+ 6 files changed, 107 deletions(-)
+ delete mode 100644 src/d3d/lfx.cpp
+ delete mode 100644 src/d3d/lfx.h
+
+diff --git a/src/d3d/lfx.cpp b/src/d3d/lfx.cpp
+deleted file mode 100644
+index c5b8ea4..0000000
+--- a/src/d3d/lfx.cpp
++++ /dev/null
+@@ -1,67 +0,0 @@
+-#include "lfx.h"
+-
+-#include "../util/util_string.h"
+-#include "../util/util_log.h"
+-
+-namespace dxvk {
+-    Lfx::Lfx() {
+-        const auto lfxModuleName = "latencyflex_layer.dll";
+-        const auto lfxModuleNameFallback = "latencyflex_wine.dll";
+-        auto useFallbackEntrypoints = false;
+-
+-        m_lfxModule = ::LoadLibraryA(lfxModuleName);
+-        if (m_lfxModule != nullptr)
+-            log::write(str::format("Successfully loaded ", lfxModuleName));
+-
+-        if (m_lfxModule == nullptr && ::GetLastError() == ERROR_MOD_NOT_FOUND) {
+-            // Try fallback entrypoints. These were used by versions prior to [9c2836f].
+-            // The fallback logic can be removed once enough time has passed since the release.
+-            // [9c2836f]: https://github.com/ishitatsuyuki/LatencyFleX/commit/9c2836faf14196190a915064b53c27e675e47960
+-            m_lfxModule = ::LoadLibraryA(lfxModuleNameFallback);
+-            if (m_lfxModule != nullptr)
+-                log::write(str::format("Successfully loaded ", lfxModuleNameFallback));
+-
+-            useFallbackEntrypoints = true;
+-        }
+-
+-        if (m_lfxModule == nullptr) {
+-            auto lastError = ::GetLastError();
+-            if (lastError != ERROR_MOD_NOT_FOUND) // Ignore library not found
+-                log::write(str::format("Loading ", !useFallbackEntrypoints ? lfxModuleName : lfxModuleNameFallback,
+-                    " failed with error code: ", lastError));
+-            return;
+-        }
+-
+-        m_lfx_WaitAndBeginFrame = GetProcAddress<PFN_lfx_WaitAndBeginFrame>(
+-            !useFallbackEntrypoints ? "lfx_WaitAndBeginFrame" : "winelfx_WaitAndBeginFrame");
+-        m_lfx_SetTargetFrameTime = GetProcAddress<PFN_lfx_SetTargetFrameTime>(
+-            !useFallbackEntrypoints ? "lfx_SetTargetFrameTime" : "winelfx_SetTargetFrameTime");
+-    }
+-
+-    Lfx::~Lfx() {
+-        if (m_lfxModule == nullptr)
+-            return;
+-
+-        ::FreeLibrary(m_lfxModule);
+-        m_lfxModule = nullptr;
+-    }
+-
+-    bool Lfx::IsAvailable() const {
+-        return m_lfxModule != nullptr;
+-    }
+-
+-    void Lfx::WaitAndBeginFrame() {
+-        if (m_lfx_WaitAndBeginFrame)
+-            m_lfx_WaitAndBeginFrame();
+-    }
+-
+-    void Lfx::SetTargetFrameTime(uint64_t frame_time_ns) {
+-        if (m_lfx_SetTargetFrameTime)
+-            m_lfx_SetTargetFrameTime(static_cast<__int64>(frame_time_ns));
+-    }
+-
+-    template <typename T>
+-    T Lfx::GetProcAddress(const char* name) {
+-        return reinterpret_cast<T>(reinterpret_cast<void*>(::GetProcAddress(m_lfxModule, name)));
+-    }
+-}
+\ No newline at end of file
+diff --git a/src/d3d/lfx.h b/src/d3d/lfx.h
+deleted file mode 100644
+index daff36e..0000000
+--- a/src/d3d/lfx.h
++++ /dev/null
+@@ -1,26 +0,0 @@
+-#pragma once
+-
+-#include "../nvapi_private.h"
+-
+-namespace dxvk {
+-    class Lfx {
+-      public:
+-        Lfx();
+-        virtual ~Lfx();
+-
+-        [[nodiscard]] virtual bool IsAvailable() const;
+-        virtual void WaitAndBeginFrame();
+-        virtual void SetTargetFrameTime(uint64_t frame_time_ns);
+-
+-      private:
+-        using PFN_lfx_WaitAndBeginFrame = void (*)();
+-        using PFN_lfx_SetTargetFrameTime = void (*)(__int64);
+-
+-        HMODULE m_lfxModule{};
+-        PFN_lfx_WaitAndBeginFrame m_lfx_WaitAndBeginFrame{};
+-        PFN_lfx_SetTargetFrameTime m_lfx_SetTargetFrameTime{};
+-
+-        template <typename T>
+-        T GetProcAddress(const char* name);
+-    };
+-}
+\ No newline at end of file
+diff --git a/src/meson.build b/src/meson.build
+index 1b4f83f..5b4055b 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -10,7 +10,6 @@ nvapi_src = files([
+   'sysinfo/nvapi_adapter.cpp',
+   'sysinfo/nvapi_adapter_registry.cpp',
+   'resource_factory.cpp',
+-  'd3d/lfx.cpp',
+   'd3d/lfx2.cpp',
+   'd3d/nvapi_d3d_instance.cpp',
+   'd3d11/nvapi_d3d11_device.cpp',
+diff --git a/tests/meson.build b/tests/meson.build
+index 5aca1d5..95b4d0e 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -6,7 +6,6 @@ nvapi_src = files([
+   '../src/util/util_log.cpp',
+   '../src/sysinfo/vulkan.cpp',
+   '../src/sysinfo/nvml.cpp',
+-  '../src/d3d/lfx.cpp',
+   '../src/d3d/nvapi_d3d_instance.cpp',
+   '../src/sysinfo/nvapi_output.cpp',
+   '../src/sysinfo/nvapi_adapter.cpp',
+diff --git a/tests/mock_factory.h b/tests/mock_factory.h
+index 0f41f74..67852f9 100644
+--- a/tests/mock_factory.h
++++ b/tests/mock_factory.h
+@@ -30,10 +30,6 @@ class MockFactory : public dxvk::ResourceFactory {
+         return std::move(m_nvmlMock);
+     }
+ 
+-    std::unique_ptr<dxvk::Lfx> CreateLfx() override {
+-        return std::move(m_lfxMock);
+-    }
+-
+     [[nodiscard]] std::array<std::unique_ptr<expectation>, 1> ConfigureAllowRelease() {
+         return {
+             NAMED_ALLOW_CALL(*m_dxgiFactoryMock, Release())
+@@ -44,5 +40,4 @@ class MockFactory : public dxvk::ResourceFactory {
+     std::unique_ptr<DXGIDxvkFactoryMock> m_dxgiFactoryMock;
+     std::unique_ptr<VulkanMock> m_vulkanMock;
+     std::unique_ptr<NvmlMock> m_nvmlMock;
+-    std::unique_ptr<LfxMock> m_lfxMock;
+ };
+diff --git a/tests/nvapi_d3d_mocks.h b/tests/nvapi_d3d_mocks.h
+index d1e7ac7..b389882 100644
+--- a/tests/nvapi_d3d_mocks.h
++++ b/tests/nvapi_d3d_mocks.h
+@@ -1,16 +1,9 @@
+ #pragma once
+ 
+ #include "nvapi_tests_private.h"
+-#include "../src/d3d/lfx.h"
+ 
+ class UnknownMock : public trompeloeil::mock_interface<IUnknown> {
+     MAKE_MOCK2(QueryInterface, HRESULT(REFIID, void**), override);
+     MAKE_MOCK0(AddRef, ULONG(), override);
+     MAKE_MOCK0(Release, ULONG(), override);
+ };
+-
+-class LfxMock : public trompeloeil::mock_interface<dxvk::Lfx> {
+-    IMPLEMENT_CONST_MOCK0(IsAvailable);
+-    IMPLEMENT_MOCK0(WaitAndBeginFrame);
+-    IMPLEMENT_MOCK1(SetTargetFrameTime);
+-};
+-- 
+2.43.0
+
+
+From cce663d43834c64bc44cc573f6b8585c4ba965f5 Mon Sep 17 00:00:00 2001
+From: FakeMichau <49685661+FakeMichau@users.noreply.github.com>
+Date: Wed, 17 Jan 2024 03:25:08 +0100
+Subject: [PATCH 3/3] Disable LFX2 when WINEHAGS is enabled
+
+---
+ src/d3d/lfx2.cpp | 4 +++-
+ src/d3d/lfx2.h   | 1 +
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/d3d/lfx2.cpp b/src/d3d/lfx2.cpp
+index b75cf0d..16b081e 100644
+--- a/src/d3d/lfx2.cpp
++++ b/src/d3d/lfx2.cpp
+@@ -7,6 +7,8 @@ namespace dxvk {
+     Lfx2::Lfx2() {
+         const auto lfxModuleName = "latencyflex2_rust.dll";
+ 
++        m_FG = std::getenv("WINEHAGS")[0] == '1';
++
+         m_lfxModule = ::LoadLibraryA(lfxModuleName);
+         if (m_lfxModule == nullptr) {
+             auto lastError = ::GetLastError();
+@@ -70,7 +72,7 @@ namespace dxvk {
+     }
+ 
+     void Lfx2::Mark(uint64_t frame_id, NV_LATENCY_MARKER_TYPE type, Com<ID3DLfx2ExtDevice>& extDevice) {
+-        if (!m_lfxContext)
++        if (!m_lfxContext || m_FG)
+             return;
+ 
+         uint32_t section;
+diff --git a/src/d3d/lfx2.h b/src/d3d/lfx2.h
+index 2e20ad7..6221d5b 100644
+--- a/src/d3d/lfx2.h
++++ b/src/d3d/lfx2.h
+@@ -47,6 +47,7 @@ namespace dxvk {
+ 
+         void EnsureFrame();
+ 
++        bool m_FG;
+         std::mutex m_frameMapMutex;
+         std::map<uint64_t, lfx2Frame*> m_frameMap;
+         std::unordered_map<uint64_t, uint32_t> m_callsExpectedByFrame;
+-- 
+2.43.0
+

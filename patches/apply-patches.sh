@@ -17,4 +17,13 @@ popd || exit
 pushd wine || exit
 git reset --hard HEAD
 git clean -xdf
+echo "Wine: Add HAGS spoof"
+patch -Np1 < ../patches/wine-hags-spoof.patch
+popd || exit
+
+pushd dxvk-nvapi || exit
+git reset --hard HEAD
+git clean -xdf
+echo "DXVK-NVAPI: Add LFX2 support"
+patch -Np1 < ../patches/lfx2-nvapi.patch
 popd || exit

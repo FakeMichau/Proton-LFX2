@@ -38,3 +38,14 @@ All upscalers are held in `Proton-LFX2/files/upscalers/` folder. The name of the
 
 By default only `2.2.1` is usable. It's a version of [CyberFSR](https://github.com/PotatoOfDoom/CyberFSR2) that uses FSR 2.2.1 and works with DirectX 11 games.  
 You are free to add more, folder for version 2.1 exists but no DLL is provided to not infringe PotatoOfDoom's license.
+
+
+Nukem's FSR3 mod
+------------
+
+You can use Nukem's mod with this build thanks to [those patches](https://github.com/ValveSoftware/Proton/issues/7361). But you need to provide _nvngx.dll file from nvidia's driver package - just extract it and copy the file to system32 inside your game's prefix. You also need to add an environment variable to spoof HAGS:
+
+`WINEHAGS=1`
+
+That will also effectively disable LFX2 because currently it causes a crash. But you can still use `LFX2=1` to spoof an Nvidia GPU instead of doing that manually.
+Also remember about applying the registry signature override file.
