@@ -1,4 +1,4 @@
-From ff4db114a05b24a5442fffaa4b1757d05731d9f0 Mon Sep 17 00:00:00 2001
+From 00ef6bc4f526bb3e8771853f7518608356e362cf Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Sat, 31 Dec 2022 23:07:33 +0900
 Subject: [PATCH 01/12] lfx2 wip
@@ -9,7 +9,7 @@ Subject: [PATCH 01/12] lfx2 wip
  src/d3d11/d3d11_context_ext.cpp | 38 +++++++++++++
  src/d3d11/d3d11_context_ext.h   |  8 ++-
  src/d3d11/d3d11_device.cpp      |  3 +
- src/d3d11/d3d11_interfaces.h    | 14 +++++
+ src/d3d11/d3d11_interfaces.h    | 13 +++++
  src/dxvk/dxvk_cmdlist.cpp       |  4 +-
  src/dxvk/dxvk_cmdlist.h         |  8 +++
  src/dxvk/dxvk_context.cpp       |  4 ++
@@ -22,7 +22,7 @@ Subject: [PATCH 01/12] lfx2 wip
  src/dxvk/meson.build            |  1 +
  src/util/util_time.h            |  6 +-
  src/vulkan/vulkan_loader.h      |  5 ++
- 18 files changed, 307 insertions(+), 4 deletions(-)
+ 18 files changed, 306 insertions(+), 4 deletions(-)
  create mode 100644 include/latencyflex2.h
  create mode 100644 src/dxvk/dxvk_lfx2.cpp
  create mode 100644 src/dxvk/dxvk_lfx2.h
@@ -96,7 +96,7 @@ index 00000000..5513093c
 +
 +#endif // LATENCYFLEX2_H
 diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
-index 977a403e..a24b78b0 100644
+index 4b06ae38..fd72258a 100644
 --- a/src/d3d11/d3d11_context.cpp
 +++ b/src/d3d11/d3d11_context.cpp
 @@ -50,7 +50,8 @@ namespace dxvk {
@@ -199,7 +199,7 @@ index 9398e484..078dcb4b 100644
          return false;
      }
 diff --git a/src/d3d11/d3d11_interfaces.h b/src/d3d11/d3d11_interfaces.h
-index 587cde13..1e1071d1 100644
+index 8a2e6fcf..77ad12ba 100644
 --- a/src/d3d11/d3d11_interfaces.h
 +++ b/src/d3d11/d3d11_interfaces.h
 @@ -16,6 +16,7 @@ enum D3D11_VK_EXTENSION : uint32_t {
@@ -226,16 +226,9 @@ index 587cde13..1e1071d1 100644
 +};
 +
  
- #ifdef _MSC_VER
- struct __declspec(uuid("bb8a4fb9-3935-4762-b44b-35189a26414a")) ID3D11VkExtShader;
-@@ -189,10 +201,12 @@ struct __declspec(uuid("8a6e3c42-f74c-45b7-8265-a231b677ca17")) ID3D11VkExtDevic
- struct __declspec(uuid("cfcf64ef-9586-46d0-bca4-97cf2ca61b06")) ID3D11VkExtDevice1;
- struct __declspec(uuid("fd0bca13-5cb6-4c3a-987e-4750de2ca791")) ID3D11VkExtContext;
- struct __declspec(uuid("874b09b2-ae0b-41d8-8476-5f3b7a0e879d")) ID3D11VkExtContext1;
-+struct __declspec(uuid("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")) ID3D11VkExtContext2;
- #else
+ #ifndef _MSC_VER
  __CRT_UUID_DECL(ID3D11VkExtShader,         0xbb8a4fb9,0x3935,0x4762,0xb4,0x4b,0x35,0x18,0x9a,0x26,0x41,0x4a);
- __CRT_UUID_DECL(ID3D11VkExtDevice,         0x8a6e3c42,0xf74c,0x45b7,0x82,0x65,0xa2,0x31,0xb6,0x77,0xca,0x17);
+@@ -189,4 +201,5 @@ __CRT_UUID_DECL(ID3D11VkExtDevice,         0x8a6e3c42,0xf74c,0x45b7,0x82,0x65,0x
  __CRT_UUID_DECL(ID3D11VkExtDevice1,        0xcfcf64ef,0x9586,0x46d0,0xbc,0xa4,0x97,0xcf,0x2c,0xa6,0x1b,0x06);
  __CRT_UUID_DECL(ID3D11VkExtContext,        0xfd0bca13,0x5cb6,0x4c3a,0x98,0x7e,0x47,0x50,0xde,0x2c,0xa7,0x91);
  __CRT_UUID_DECL(ID3D11VkExtContext1,       0x874b09b2,0xae0b,0x41d8,0x84,0x76,0x5f,0x3b,0x7a,0x0e,0x87,0x9d);
@@ -264,7 +257,7 @@ index 3bd3aa95..ad190fc0 100644
      // Less important stuff
      m_signalTracker.reset();
 diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
-index b9b9a165..7defe86d 100644
+index 1934b9a0..110a7ccc 100644
 --- a/src/dxvk/dxvk_cmdlist.h
 +++ b/src/dxvk/dxvk_cmdlist.h
 @@ -1,6 +1,7 @@
@@ -310,7 +303,7 @@ index b9b9a165..7defe86d 100644
      DxvkCommandSubmission     m_commandSubmission;
  
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 80c2620d..89decd8c 100644
+index bbd139ed..a5f1cd9c 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
 @@ -6444,4 +6444,8 @@ namespace dxvk {
@@ -323,7 +316,7 @@ index 80c2620d..89decd8c 100644
 +
  }
 diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
-index 93ed91e3..1572e40f 100644
+index b1fbc7df..1379cef6 100644
 --- a/src/dxvk/dxvk_context.h
 +++ b/src/dxvk/dxvk_context.h
 @@ -1388,6 +1388,8 @@ namespace dxvk {
@@ -359,7 +352,7 @@ index a24ee311..5b3a1f04 100644
      DxvkDeviceFeatures          m_features;
      DxvkDeviceInfo              m_properties;
 diff --git a/src/dxvk/dxvk_extensions.h b/src/dxvk/dxvk_extensions.h
-index 8164ccf6..59bf0cdd 100644
+index ae4c8a74..ac0f4853 100644
 --- a/src/dxvk/dxvk_extensions.h
 +++ b/src/dxvk/dxvk_extensions.h
 @@ -297,6 +297,7 @@ namespace dxvk {
@@ -597,7 +590,7 @@ index 1741ccb8..630dfb7b 100644
 2.43.0
 
 
-From 5ed5522ab2006db98bc07a7c883ebc2918a3c928 Mon Sep 17 00:00:00 2001
+From cf40b68b9e9423f4653c3a3b7aa7765686cf86e5 Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Sat, 31 Dec 2022 23:30:09 +0900
 Subject: [PATCH 02/12] unix compat for ci
@@ -654,7 +647,7 @@ index ccb1ad1e..1bea5bbe 100644
 2.43.0
 
 
-From f6d5cda6ccfce58d5a6432fedeb12904541e8c6d Mon Sep 17 00:00:00 2001
+From 57357cc438286dcaf38138eccde080d8fdab299a Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Sat, 31 Dec 2022 23:33:17 +0900
 Subject: [PATCH 03/12] more win32 compat for ci
@@ -741,7 +734,7 @@ index c62f1065..bcc311b6 100644
 2.43.0
 
 
-From 9c1a182ce8f9722c56335a170853d06bf4bae214 Mon Sep 17 00:00:00 2001
+From 3f02471745b7fdcf7301f1e32552b768282bb235 Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Sun, 1 Jan 2023 16:04:13 +0900
 Subject: [PATCH 04/12] deconstify
@@ -835,7 +828,7 @@ index 494256d5..f56bcb51 100644
 2.43.0
 
 
-From cb9b01cc92efbc5f79006fcd1b77b18896ad9b7c Mon Sep 17 00:00:00 2001
+From 3e359e1ba2a7a5da872bbd42b2e3a5e5ccb2dce2 Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Mon, 2 Jan 2023 12:08:47 +0900
 Subject: [PATCH 05/12] pch
@@ -936,7 +929,7 @@ index 00000000..081d583b
 2.43.0
 
 
-From 295c0120f1f12e797dc11837b3421121ceb817b6 Mon Sep 17 00:00:00 2001
+From 424a50594af6c38f3e7e76412f1dc2dd5b6ad07d Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Mon, 2 Jan 2023 22:34:42 +0900
 Subject: [PATCH 06/12] Frame wrapper conversion, add implicit frame support
@@ -948,7 +941,7 @@ Subject: [PATCH 06/12] Frame wrapper conversion, add implicit frame support
  src/d3d11/d3d11_context_imm.h   |   2 +
  src/d3d11/d3d11_device.cpp      |   9 +--
  src/d3d11/d3d11_device.h        |   6 +-
- src/d3d11/d3d11_interfaces.h    |   9 +++
+ src/d3d11/d3d11_interfaces.h    |   8 +++
  src/d3d11/d3d11_swapchain.cpp   |   1 +
  src/dxvk/dxvk_cmdlist.h         |   4 +-
  src/dxvk/dxvk_context.cpp       |  35 +++++++++-
@@ -959,7 +952,7 @@ Subject: [PATCH 06/12] Frame wrapper conversion, add implicit frame support
  src/dxvk/dxvk_gpu_query.cpp     |   2 +-
  src/dxvk/dxvk_lfx2.cpp          | 109 +++++++++++++++++++++++++++++---
  src/dxvk/dxvk_lfx2.h            |  44 +++++++++++--
- 17 files changed, 223 insertions(+), 49 deletions(-)
+ 17 files changed, 222 insertions(+), 49 deletions(-)
 
 diff --git a/src/d3d11/d3d11_context_ext.cpp b/src/d3d11/d3d11_context_ext.cpp
 index cd1a7d1d..3e33f2dc 100644
@@ -1107,7 +1100,7 @@ index 7a44b5ad..129353be 100644
      
      D3D11DXGIDevice* m_container;
 diff --git a/src/d3d11/d3d11_interfaces.h b/src/d3d11/d3d11_interfaces.h
-index 1e1071d1..813fb1bf 100644
+index 77ad12ba..f7b8e6d2 100644
 --- a/src/d3d11/d3d11_interfaces.h
 +++ b/src/d3d11/d3d11_interfaces.h
 @@ -115,6 +115,13 @@ ID3D11VkExtDevice1 : public ID3D11VkExtDevice {
@@ -1125,14 +1118,6 @@ index 1e1071d1..813fb1bf 100644
  /**
   * \brief Extended D3D11 context
 @@ -199,6 +206,7 @@ ID3D11VkExtContext2 : public ID3D11VkExtContext1 {
- struct __declspec(uuid("bb8a4fb9-3935-4762-b44b-35189a26414a")) ID3D11VkExtShader;
- struct __declspec(uuid("8a6e3c42-f74c-45b7-8265-a231b677ca17")) ID3D11VkExtDevice;
- struct __declspec(uuid("cfcf64ef-9586-46d0-bca4-97cf2ca61b06")) ID3D11VkExtDevice1;
-+struct __declspec(uuid("a1a5185c-0c43-4608-91a0-97a0cd098d48")) ID3D11VkExtDevice2;
- struct __declspec(uuid("fd0bca13-5cb6-4c3a-987e-4750de2ca791")) ID3D11VkExtContext;
- struct __declspec(uuid("874b09b2-ae0b-41d8-8476-5f3b7a0e879d")) ID3D11VkExtContext1;
- struct __declspec(uuid("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")) ID3D11VkExtContext2;
-@@ -206,6 +214,7 @@ struct __declspec(uuid("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")) ID3D11VkExtConte
  __CRT_UUID_DECL(ID3D11VkExtShader,         0xbb8a4fb9,0x3935,0x4762,0xb4,0x4b,0x35,0x18,0x9a,0x26,0x41,0x4a);
  __CRT_UUID_DECL(ID3D11VkExtDevice,         0x8a6e3c42,0xf74c,0x45b7,0x82,0x65,0xa2,0x31,0xb6,0x77,0xca,0x17);
  __CRT_UUID_DECL(ID3D11VkExtDevice1,        0xcfcf64ef,0x9586,0x46d0,0xbc,0xa4,0x97,0xcf,0x2c,0xa6,0x1b,0x06);
@@ -1141,10 +1126,10 @@ index 1e1071d1..813fb1bf 100644
  __CRT_UUID_DECL(ID3D11VkExtContext1,       0x874b09b2,0xae0b,0x41d8,0x84,0x76,0x5f,0x3b,0x7a,0x0e,0x87,0x9d);
  __CRT_UUID_DECL(ID3D11VkExtContext2,       0x6e65f21a,0x0ecd,0x4e76,0x8f,0xaf,0x9e,0x9a,0xfa,0x40,0x93,0xa4);
 diff --git a/src/d3d11/d3d11_swapchain.cpp b/src/d3d11/d3d11_swapchain.cpp
-index 0e823f41..0f2610c7 100644
+index 73939e2c..f37486bc 100644
 --- a/src/d3d11/d3d11_swapchain.cpp
 +++ b/src/d3d11/d3d11_swapchain.cpp
-@@ -455,6 +455,7 @@ namespace dxvk {
+@@ -450,6 +450,7 @@ namespace dxvk {
      // Ensure that we can safely destroy the swap chain
      m_device->waitForSubmission(&m_presentStatus);
      m_device->waitForIdle();
@@ -1153,7 +1138,7 @@ index 0e823f41..0f2610c7 100644
      m_presentStatus.result = VK_SUCCESS;
      m_dirtyHdrMetadata = true;
 diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
-index 7defe86d..471ed65a 100644
+index 110a7ccc..55507bb8 100644
 --- a/src/dxvk/dxvk_cmdlist.h
 +++ b/src/dxvk/dxvk_cmdlist.h
 @@ -321,8 +321,8 @@ namespace dxvk {
@@ -1168,7 +1153,7 @@ index 7defe86d..471ed65a 100644
  
      /**
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 89decd8c..58771683 100644
+index a5f1cd9c..319b292d 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
 @@ -6444,8 +6444,39 @@ namespace dxvk {
@@ -1214,7 +1199,7 @@ index 89decd8c..58771683 100644
  
  }
 diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
-index 1572e40f..58970f4f 100644
+index 1379cef6..ffd505ba 100644
 --- a/src/dxvk/dxvk_context.h
 +++ b/src/dxvk/dxvk_context.h
 @@ -67,6 +67,9 @@ namespace dxvk {
@@ -1569,7 +1554,7 @@ index 1f5c5b5f..809234dc 100644
 2.43.0
 
 
-From 1852e8adae12ee1a6f6deceaf2b942d433a7320f Mon Sep 17 00:00:00 2001
+From b9171a2ff124c6bee91b4f36c0b0d9c1cd08e69c Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Sat, 7 Jan 2023 12:58:36 +0900
 Subject: [PATCH 07/12] Update to new LFX2 implicit context API
@@ -1726,7 +1711,7 @@ index 129353be..ab4763ed 100644
    private:
      
 diff --git a/src/d3d11/d3d11_interfaces.h b/src/d3d11/d3d11_interfaces.h
-index 813fb1bf..08a99cff 100644
+index f7b8e6d2..b6d83e54 100644
 --- a/src/d3d11/d3d11_interfaces.h
 +++ b/src/d3d11/d3d11_interfaces.h
 @@ -118,7 +118,7 @@ ID3D11VkExtDevice1 : public ID3D11VkExtDevice {
@@ -1739,10 +1724,10 @@ index 813fb1bf..08a99cff 100644
  };
  
 diff --git a/src/d3d11/d3d11_swapchain.cpp b/src/d3d11/d3d11_swapchain.cpp
-index 0f2610c7..7ef7cffd 100644
+index f37486bc..4bae8609 100644
 --- a/src/d3d11/d3d11_swapchain.cpp
 +++ b/src/d3d11/d3d11_swapchain.cpp
-@@ -455,7 +455,7 @@ namespace dxvk {
+@@ -450,7 +450,7 @@ namespace dxvk {
      // Ensure that we can safely destroy the swap chain
      m_device->waitForSubmission(&m_presentStatus);
      m_device->waitForIdle();
@@ -1752,7 +1737,7 @@ index 0f2610c7..7ef7cffd 100644
      m_presentStatus.result = VK_SUCCESS;
      m_dirtyHdrMetadata = true;
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 58771683..96c30d54 100644
+index 319b292d..b6fdbe93 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
 @@ -6452,7 +6452,7 @@ namespace dxvk {
@@ -1893,7 +1878,7 @@ index 809234dc..96c7931b 100644
 2.43.0
 
 
-From 64c9787651113a57810ff677bf09b89d6d4af55e Mon Sep 17 00:00:00 2001
+From 52ccfa0364dc2e61debeccf6df3d4f1dcb0e7d24 Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Sun, 8 Jan 2023 19:09:59 +0900
 Subject: [PATCH 08/12] Convert to new unified ID3DLfx2ExtDevice API
@@ -1906,8 +1891,8 @@ Subject: [PATCH 08/12] Convert to new unified ID3DLfx2ExtDevice API
  src/d3d11/d3d11_context_imm.h   |  1 +
  src/d3d11/d3d11_device.cpp      | 59 +++++++++++++++++++++++++++++----
  src/d3d11/d3d11_device.h        | 29 ++++++++++++++--
- src/d3d11/d3d11_interfaces.h    | 28 +++++-----------
- 8 files changed, 135 insertions(+), 65 deletions(-)
+ src/d3d11/d3d11_interfaces.h    | 25 +++++---------
+ 8 files changed, 134 insertions(+), 63 deletions(-)
 
 diff --git a/include/latencyflex2.h b/include/latencyflex2.h
 index 9de7a1cf..91ab1397 100644
@@ -1994,7 +1979,7 @@ index 9de7a1cf..91ab1397 100644
  LFX2_API
  struct lfx2Frame *lfx2FrameDequeueImplicit(struct lfx2ImplicitContext *context,
 diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
-index a24b78b0..977a403e 100644
+index fd72258a..4b06ae38 100644
 --- a/src/d3d11/d3d11_context.cpp
 +++ b/src/d3d11/d3d11_context.cpp
 @@ -50,8 +50,7 @@ namespace dxvk {
@@ -2243,7 +2228,7 @@ index ab4763ed..d0d6a285 100644
      D3D11VideoDevice    m_d3d11Video;
      D3D11on12Device     m_d3d11on12;
 diff --git a/src/d3d11/d3d11_interfaces.h b/src/d3d11/d3d11_interfaces.h
-index 08a99cff..8443f0a3 100644
+index b6d83e54..35bbedf0 100644
 --- a/src/d3d11/d3d11_interfaces.h
 +++ b/src/d3d11/d3d11_interfaces.h
 @@ -115,10 +115,14 @@ ID3D11VkExtDevice1 : public ID3D11VkExtDevice {
@@ -2264,7 +2249,7 @@ index 08a99cff..8443f0a3 100644
  
  };
  
-@@ -190,32 +194,18 @@ ID3D11VkExtContext1 : public ID3D11VkExtContext {
+@@ -190,24 +194,11 @@ ID3D11VkExtContext1 : public ID3D11VkExtContext {
            uint32_t                numWriteResources) = 0;
  };
  
@@ -2280,16 +2265,7 @@ index 08a99cff..8443f0a3 100644
 -};
 -
 -
- #ifdef _MSC_VER
- struct __declspec(uuid("bb8a4fb9-3935-4762-b44b-35189a26414a")) ID3D11VkExtShader;
- struct __declspec(uuid("8a6e3c42-f74c-45b7-8265-a231b677ca17")) ID3D11VkExtDevice;
- struct __declspec(uuid("cfcf64ef-9586-46d0-bca4-97cf2ca61b06")) ID3D11VkExtDevice1;
--struct __declspec(uuid("a1a5185c-0c43-4608-91a0-97a0cd098d48")) ID3D11VkExtDevice2;
-+struct __declspec(uuid("851a9f0f-5da0-4850-b563-a7bbc414f4e6")) ID3DLfx2ExtDevice;
- struct __declspec(uuid("fd0bca13-5cb6-4c3a-987e-4750de2ca791")) ID3D11VkExtContext;
- struct __declspec(uuid("874b09b2-ae0b-41d8-8476-5f3b7a0e879d")) ID3D11VkExtContext1;
--struct __declspec(uuid("6e65f21a-0ecd-4e76-8faf-9e9afa4093a4")) ID3D11VkExtContext2;
- #else
+ #ifndef _MSC_VER
  __CRT_UUID_DECL(ID3D11VkExtShader,         0xbb8a4fb9,0x3935,0x4762,0xb4,0x4b,0x35,0x18,0x9a,0x26,0x41,0x4a);
  __CRT_UUID_DECL(ID3D11VkExtDevice,         0x8a6e3c42,0xf74c,0x45b7,0x82,0x65,0xa2,0x31,0xb6,0x77,0xca,0x17);
  __CRT_UUID_DECL(ID3D11VkExtDevice1,        0xcfcf64ef,0x9586,0x46d0,0xbc,0xa4,0x97,0xcf,0x2c,0xa6,0x1b,0x06);
@@ -2303,7 +2279,7 @@ index 08a99cff..8443f0a3 100644
 2.43.0
 
 
-From 20960e4000854dc849c1d35fabf387a83f0ca3d1 Mon Sep 17 00:00:00 2001
+From 8a374ead0982bdf5e3d466979e5ba436fc7e1cff Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Fri, 13 Jan 2023 18:56:54 +0900
 Subject: [PATCH 09/12] Don't call FreeLibrary within unload callback
@@ -2332,7 +2308,7 @@ index 2caa8983..4d5298db 100644
 2.43.0
 
 
-From 6d945ce3607d529b5e6d2d75d4d393c69486a358 Mon Sep 17 00:00:00 2001
+From 1437bedd1b98814040ad3356d3272654f8c1516d Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Sun, 15 Jan 2023 12:51:34 +0900
 Subject: [PATCH 10/12] Port to new LFX2 Vulkan Context API
@@ -2585,7 +2561,7 @@ index ad190fc0..a38fea40 100644
      // Less important stuff
      m_signalTracker.reset();
 diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
-index 471ed65a..361448ea 100644
+index 55507bb8..cc3b581e 100644
 --- a/src/dxvk/dxvk_cmdlist.h
 +++ b/src/dxvk/dxvk_cmdlist.h
 @@ -321,17 +321,12 @@ namespace dxvk {
@@ -2635,7 +2611,7 @@ index 471ed65a..361448ea 100644
        if (cmdBuffer == DxvkCmdBuffer::ExecBuffer) return m_cmd.execBuffer;
        if (cmdBuffer == DxvkCmdBuffer::InitBuffer) return m_cmd.initBuffer;
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 96c30d54..2f34e712 100644
+index b6fdbe93..726356a6 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
 @@ -106,8 +106,10 @@ namespace dxvk {
@@ -2693,7 +2669,7 @@ index 96c30d54..2f34e712 100644
      }
    }
 diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
-index 58970f4f..b709edb6 100644
+index ffd505ba..b5af4d52 100644
 --- a/src/dxvk/dxvk_context.h
 +++ b/src/dxvk/dxvk_context.h
 @@ -1391,8 +1391,6 @@ namespace dxvk {
@@ -2881,7 +2857,7 @@ index 96c7931b..e6ae73df 100644
 2.43.0
 
 
-From f0c5bc28ba765bc8e701b70f6896e260bc42c46f Mon Sep 17 00:00:00 2001
+From 62e4b89d0e95979f85737df752207d5da4d51e41 Mon Sep 17 00:00:00 2001
 From: Tatsuyuki Ishi <ishitatsuyuki@gmail.com>
 Date: Tue, 7 Feb 2023 14:46:17 +0900
 Subject: [PATCH 11/12] Add support for explicit latency and throughput
@@ -2889,7 +2865,6 @@ Subject: [PATCH 11/12] Add support for explicit latency and throughput
 
 ---
  include/latencyflex2.h          | 11 +++++++++
- meson.build                     |  1 -
  src/d3d11/d3d11_context_imm.cpp |  3 ++-
  src/d3d11/d3d11_device.cpp      |  7 ++----
  src/d3d9/d3d9_device.cpp        |  1 +
@@ -2899,7 +2874,7 @@ Subject: [PATCH 11/12] Add support for explicit latency and throughput
  src/dxvk/dxvk_cs.h              |  8 ++++++
  src/dxvk/dxvk_lfx2.cpp          |  2 ++
  src/dxvk/dxvk_lfx2.h            |  2 ++
- 11 files changed, 84 insertions(+), 27 deletions(-)
+ 10 files changed, 84 insertions(+), 26 deletions(-)
 
 diff --git a/include/latencyflex2.h b/include/latencyflex2.h
 index 9e8d1536..bda252c5 100644
@@ -2930,18 +2905,6 @@ index 9e8d1536..bda252c5 100644
  LFX2_API struct lfx2ImplicitContext *lfx2ImplicitContextCreate(void);
  
  LFX2_API void lfx2ImplicitContextRelease(struct lfx2ImplicitContext *context);
-diff --git a/meson.build b/meson.build
-index b571729d..31cc7e0d 100644
---- a/meson.build
-+++ b/meson.build
-@@ -60,7 +60,6 @@ if platform == 'windows'
-   # Wine's built-in back traces only work with dwarf4 symbols
-   if get_option('debug')
-     compiler_args += [
--      '-gdwarf-4',
-     ]
-   endif
- 
 diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
 index 767956c2..bdab28c9 100644
 --- a/src/d3d11/d3d11_context_imm.cpp
@@ -2989,10 +2952,10 @@ index ea39e6fe..f0ba640b 100644
    }
  }
 diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
-index 732f818c..47d1405b 100644
+index a5fc7f5d..e0030cf5 100644
 --- a/src/d3d9/d3d9_device.cpp
 +++ b/src/d3d9/d3d9_device.cpp
-@@ -5093,6 +5093,7 @@ namespace dxvk {
+@@ -5272,6 +5272,7 @@ namespace dxvk {
  
  
    void D3D9DeviceEx::EmitCsChunk(DxvkCsChunkRef&& chunk) {
@@ -3001,7 +2964,7 @@ index 732f818c..47d1405b 100644
    }
  
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 2f34e712..9353d5df 100644
+index 726356a6..384be705 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
 @@ -1,4 +1,5 @@
@@ -3068,7 +3031,7 @@ index 2f34e712..9353d5df 100644
 +  }
  }
 diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
-index b709edb6..a471fed8 100644
+index b5af4d52..8dcdb3a7 100644
 --- a/src/dxvk/dxvk_context.h
 +++ b/src/dxvk/dxvk_context.h
 @@ -68,7 +68,9 @@ namespace dxvk {
@@ -3158,7 +3121,7 @@ index fe1f4c3a..44d7e718 100644
            // Use a separate mutex for the chunk counter, this
            // will only ever be contested if synchronization is
 diff --git a/src/dxvk/dxvk_cs.h b/src/dxvk/dxvk_cs.h
-index 589e5a8d..728d16f7 100644
+index ae20746a..d8ee4fdf 100644
 --- a/src/dxvk/dxvk_cs.h
 +++ b/src/dxvk/dxvk_cs.h
 @@ -233,10 +233,18 @@ namespace dxvk {
@@ -3210,7 +3173,7 @@ index e6ae73df..dc81d0a5 100644
 2.43.0
 
 
-From a899eaeab2bd676ee982c01e843af3f16e1a974c Mon Sep 17 00:00:00 2001
+From 30b72b3ad2c4a9aae9eb1a7681128e464bb9b1d9 Mon Sep 17 00:00:00 2001
 From: FakeMichau <49685661+FakeMichau@users.noreply.github.com>
 Date: Tue, 16 Jan 2024 18:15:48 +0100
 Subject: [PATCH 12/12] Update for upstream changes
@@ -3220,7 +3183,7 @@ Subject: [PATCH 12/12] Update for upstream changes
  1 file changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 9353d5df..7c6f6678 100644
+index 384be705..0b319287 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
 @@ -6476,7 +6476,8 @@ namespace dxvk {
