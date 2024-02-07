@@ -890,50 +890,58 @@ index d1e7ac7..b389882 100644
 2.43.0
 
 
-From cce663d43834c64bc44cc573f6b8585c4ba965f5 Mon Sep 17 00:00:00 2001
+From b4d01b2ce7367d0be6cfe9cfcf6f0d1884e80ccc Mon Sep 17 00:00:00 2001
 From: FakeMichau <49685661+FakeMichau@users.noreply.github.com>
-Date: Wed, 17 Jan 2024 03:25:08 +0100
+Date: Wed, 7 Feb 2024 16:39:27 +0100
 Subject: [PATCH 3/3] Disable LFX2 when WINEHAGS is enabled
 
 ---
- src/d3d/lfx2.cpp | 4 +++-
+ src/d3d/lfx2.cpp | 6 +++++-
  src/d3d/lfx2.h   | 1 +
- 2 files changed, 4 insertions(+), 1 deletion(-)
+ 2 files changed, 6 insertions(+), 1 deletion(-)
 
 diff --git a/src/d3d/lfx2.cpp b/src/d3d/lfx2.cpp
-index b75cf0d..16b081e 100644
+index b75cf0d..a726afa 100644
 --- a/src/d3d/lfx2.cpp
 +++ b/src/d3d/lfx2.cpp
-@@ -7,6 +7,8 @@ namespace dxvk {
+@@ -1,12 +1,16 @@
+ #include "lfx2.h"
+ #include "util/util_log.h"
+ #include "util/util_string.h"
++#include "util/util_env.h"
+
+ namespace dxvk {
+
      Lfx2::Lfx2() {
          const auto lfxModuleName = "latencyflex2_rust.dll";
- 
-+        m_FG = std::getenv("WINEHAGS")[0] == '1';
+
++        auto hagsEnv = env::getEnvVariable("WINEHAGS");
++        m_FG = !hagsEnv.empty() && hagsEnv != "0";
 +
          m_lfxModule = ::LoadLibraryA(lfxModuleName);
          if (m_lfxModule == nullptr) {
              auto lastError = ::GetLastError();
-@@ -70,7 +72,7 @@ namespace dxvk {
+@@ -70,7 +74,7 @@ namespace dxvk {
      }
- 
+
      void Lfx2::Mark(uint64_t frame_id, NV_LATENCY_MARKER_TYPE type, Com<ID3DLfx2ExtDevice>& extDevice) {
 -        if (!m_lfxContext)
 +        if (!m_lfxContext || m_FG)
              return;
- 
+
          uint32_t section;
 diff --git a/src/d3d/lfx2.h b/src/d3d/lfx2.h
 index 2e20ad7..6221d5b 100644
 --- a/src/d3d/lfx2.h
 +++ b/src/d3d/lfx2.h
 @@ -47,6 +47,7 @@ namespace dxvk {
- 
+
          void EnsureFrame();
- 
+
 +        bool m_FG;
          std::mutex m_frameMapMutex;
          std::map<uint64_t, lfx2Frame*> m_frameMap;
          std::unordered_map<uint64_t, uint32_t> m_callsExpectedByFrame;
--- 
+--
 2.43.0
 
