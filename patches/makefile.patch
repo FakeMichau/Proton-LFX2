@@ -1,0 +1,21 @@
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -650,6 +650,18 @@
+ 	touch $@
+ 
+ 
++##
++## LatencyFleX2 and Upscalers
++##
++$(OBJ)/.vkd3d-proton-post-build32:
++	mkdir -p "$(DST_DIR)"/lib/wine/lfx2
++	cp $(SRCDIR)/lfx2-bin/latencyflex2_rust_32.dll "$(DST_DIR)"/lib/wine/lfx2/latencyflex2_rust.dll
++
++$(OBJ)/.vkd3d-proton-post-build64:
++	mkdir -p "$(DST_DIR)"/lib64/wine/lfx2
++	cp $(SRCDIR)/lfx2-bin/latencyflex2_rust.dll "$(DST_DIR)"/lib64/wine/lfx2
++	mkdir -p "$(DST_DIR)"/upscalers
++	cp -r $(SRCDIR)/upscalers/* "$(DST_DIR)"/upscalers
+ 
+ ##
+ ## mediaconv

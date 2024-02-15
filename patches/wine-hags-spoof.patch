@@ -1,0 +1,859 @@
+From 90a22ca08ec21bebccea8d876fb60ff10c53f09f Mon Sep 17 00:00:00 2001
+From: FakeMichau <49685661+FakeMichau@users.noreply.github.com>
+Date: Tue, 16 Jan 2024 23:24:09 +0100
+Subject: [PATCH 1/2] hags 0001
+
+---
+ dlls/gdi32/gdi32.spec          |   2 +-
+ dlls/gdi32/objects.c           |   6 -
+ dlls/win32u/dibdrv/dc.c        |   2 +
+ dlls/win32u/driver.c           |  49 ++++++-
+ dlls/win32u/emfdrv.c           |   1 +
+ dlls/win32u/font.c             |   1 +
+ dlls/win32u/gdiobj.c           |   1 +
+ dlls/win32u/path.c             |   1 +
+ dlls/win32u/win32u.spec        |   2 +-
+ dlls/win32u/win32u_private.h   |   1 +
+ dlls/win32u/wrappers.c         |   6 +
+ dlls/wineps.drv/init.c         |   1 +
+ dlls/winex11.drv/init.c        |   1 +
+ dlls/winex11.drv/x11drv.h      |   1 +
+ dlls/winex11.drv/x11drv_main.c | 237 +++++++++++++++++++++++++++++++++
+ dlls/winex11.drv/xrender.c     |   1 +
+ include/ddk/d3dkmthk.h         |  17 +++
+ include/ntgdi.h                |   1 +
+ include/wine/gdi_driver.h      |   1 +
+ 19 files changed, 323 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/gdi32/gdi32.spec b/dlls/gdi32/gdi32.spec
+index 92b9663fde5..363c424aafc 100644
+--- a/dlls/gdi32/gdi32.spec
++++ b/dlls/gdi32/gdi32.spec
+@@ -79,7 +79,7 @@
+ @ stdcall D3DKMTCreateDevice(ptr) win32u.NtGdiDdDDICreateDevice
+ @ stdcall D3DKMTDestroyDCFromMemory(ptr) win32u.NtGdiDdDDIDestroyDCFromMemory
+ @ stdcall D3DKMTDestroyDevice(ptr) win32u.NtGdiDdDDIDestroyDevice
+-@ stdcall D3DKMTEnumAdapters2(ptr)
++@ stdcall D3DKMTEnumAdapters2(ptr) win32u.NtGdiDdDDIEnumAdapters2
+ @ stdcall D3DKMTEscape(ptr) win32u.NtGdiDdDDIEscape
+ @ stdcall D3DKMTOpenAdapterFromDeviceName(ptr) win32u.NtGdiDdDDIOpenAdapterFromDeviceName
+ @ stdcall D3DKMTOpenAdapterFromGdiDisplayName(ptr)
+diff --git a/dlls/gdi32/objects.c b/dlls/gdi32/objects.c
+index bddc29a3007..070ce9c3885 100644
+--- a/dlls/gdi32/objects.c
++++ b/dlls/gdi32/objects.c
+@@ -971,12 +971,6 @@ done:
+     return status;
+ }
+ 
+-NTSTATUS WINAPI D3DKMTEnumAdapters2( const void *param )
+-{
+-    FIXME( "param %p stub.\n", param );
+-    return STATUS_NOT_SUPPORTED;
+-}
+-
+ /***********************************************************************
+  *           SetObjectOwner    (GDI32.@)
+  */
+diff --git a/dlls/win32u/dibdrv/dc.c b/dlls/win32u/dibdrv/dc.c
+index 68a009f576e..2638d5cd0b7 100644
+--- a/dlls/win32u/dibdrv/dc.c
++++ b/dlls/win32u/dibdrv/dc.c
+@@ -710,6 +710,7 @@ const struct gdi_dc_funcs dib_driver =
+     NULL,                               /* pUnrealizePalette */
+     NULL,                               /* pD3DKMTCheckVidPnExclusiveOwnership */
+     NULL,                               /* pD3DKMTCloseAdapter */
++    NULL,                               /* pD3DKMTEnumAdapters2 */
+     NULL,                               /* pD3DKMTOpenAdapterFromLuid */
+     NULL,                               /* pD3DKMTQueryVideoMemoryInfo */
+     NULL,                               /* pD3DKMTSetVidPnSourceOwner */
+@@ -1267,6 +1268,7 @@ static const struct gdi_dc_funcs window_driver =
+     NULL,                               /* pUnrealizePalette */
+     NULL,                               /* pD3DKMTCheckVidPnExclusiveOwnership */
+     NULL,                               /* pD3DKMTCloseAdapter */
++    NULL,                               /* pD3DKMTEnumAdapters2 */
+     NULL,                               /* pD3DKMTOpenAdapterFromLuid */
+     NULL,                               /* pD3DKMTQueryVideoMemoryInfo */
+     NULL,                               /* pD3DKMTSetVidPnSourceOwner */
+diff --git a/dlls/win32u/driver.c b/dlls/win32u/driver.c
+index 2a1da075dd4..16bb5f778b7 100644
+--- a/dlls/win32u/driver.c
++++ b/dlls/win32u/driver.c
+@@ -54,6 +54,7 @@ static struct user_driver_funcs null_user_driver;
+ 
+ static struct list d3dkmt_adapters = LIST_INIT( d3dkmt_adapters );
+ static struct list d3dkmt_devices = LIST_INIT( d3dkmt_devices );
++static D3DKMT_HANDLE handle_start = 0;
+ 
+ static pthread_mutex_t driver_lock = PTHREAD_MUTEX_INITIALIZER;
+ static WCHAR driver_load_error[80];
+@@ -550,6 +551,11 @@ static NTSTATUS CDECL nulldrv_D3DKMTCloseAdapter( const D3DKMT_CLOSEADAPTER *des
+     return STATUS_PROCEDURE_NOT_FOUND;
+ }
+ 
++static NTSTATUS CDECL nulldrv_D3DKMTEnumAdapters2( D3DKMT_ENUMADAPTERS2 *desc )
++{
++    return STATUS_PROCEDURE_NOT_FOUND;
++}
++
+ static NTSTATUS CDECL nulldrv_D3DKMTOpenAdapterFromLuid( D3DKMT_OPENADAPTERFROMLUID *desc )
+ {
+     return STATUS_PROCEDURE_NOT_FOUND;
+@@ -658,6 +664,7 @@ const struct gdi_dc_funcs null_driver =
+     nulldrv_UnrealizePalette,           /* pUnrealizePalette */
+     nulldrv_D3DKMTCheckVidPnExclusiveOwnership, /* pD3DKMTCheckVidPnExclusiveOwnership */
+     nulldrv_D3DKMTCloseAdapter,         /* pD3DKMTCloseAdapter */
++    nulldrv_D3DKMTEnumAdapters2,        /* pD3DKMTEnumAdapters2 */
+     nulldrv_D3DKMTOpenAdapterFromLuid,  /* pD3DKMTOpenAdapterFromLuid */
+     nulldrv_D3DKMTQueryVideoMemoryInfo, /* pD3DKMTQueryVideoMemoryInfo */
+     nulldrv_D3DKMTSetVidPnSourceOwner,  /* pD3DKMTSetVidPnSourceOwner */
+@@ -1421,6 +1428,47 @@ NTSTATUS WINAPI NtGdiDdDDICloseAdapter( const D3DKMT_CLOSEADAPTER *desc )
+     return status;
+ }
+ 
++/******************************************************************************
++ *           NtGdiDdDDIEnumAdapters2    (win32u.@)
++ */
++NTSTATUS WINAPI NtGdiDdDDIEnumAdapters2( D3DKMT_ENUMADAPTERS2 *desc )
++{
++    NTSTATUS status = STATUS_UNSUCCESSFUL;
++    struct d3dkmt_adapter *adapter;
++    ULONG i;
++
++    TRACE("(%p)\n", desc);
++
++    if (!desc) return STATUS_INVALID_PARAMETER;
++
++    if (get_display_driver()->pD3DKMTEnumAdapters2)
++    {
++        if (desc->pAdapters)
++        {
++            pthread_mutex_lock( &driver_lock );
++
++            for (i = 0; i < desc->NumAdapters; ++i)
++            {
++                if (!(adapter = malloc( sizeof( *adapter ) )))
++                {
++                    pthread_mutex_unlock( &driver_lock );
++                    return STATUS_NO_MEMORY;
++                }
++
++                desc->pAdapters[i].hAdapter = adapter->handle = ++handle_start;
++                list_add_tail( &d3dkmt_adapters, &adapter->entry );
++            }
++
++            pthread_mutex_unlock( &driver_lock );
++        }
++
++        status = get_display_driver()->pD3DKMTEnumAdapters2( desc );
++    }
++
++    return status;
++}
++
++
+ /******************************************************************************
+  *           NtGdiDdDDIOpenAdapterFromDeviceName    (win32u.@)
+  */
+@@ -1446,7 +1494,6 @@ NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromDeviceName( D3DKMT_OPENADAPTERFROMDEVIC
+  */
+ NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromLuid( D3DKMT_OPENADAPTERFROMLUID *desc )
+ {
+-    static D3DKMT_HANDLE handle_start = 0;
+     struct d3dkmt_adapter *adapter;
+ 
+     if (!(adapter = malloc( sizeof( *adapter ) ))) return STATUS_NO_MEMORY;
+diff --git a/dlls/win32u/emfdrv.c b/dlls/win32u/emfdrv.c
+index 848a5bbaa4b..bd601d6ff13 100644
+--- a/dlls/win32u/emfdrv.c
++++ b/dlls/win32u/emfdrv.c
+@@ -524,6 +524,7 @@ static const struct gdi_dc_funcs emfdrv_driver =
+     NULL,                            /* pUnrealizePalette */
+     NULL,                            /* pD3DKMTCheckVidPnExclusiveOwnership */
+     NULL,                            /* pD3DKMTCloseAdapter */
++    NULL,                            /* pD3DKMTEnumAdapters2 */
+     NULL,                            /* pD3DKMTOpenAdapterFromLuid */
+     NULL,                            /* pD3DKMTQueryVideoMemoryInfo */
+     NULL,                            /* pD3DKMTSetVidPnSourceOwner */
+diff --git a/dlls/win32u/font.c b/dlls/win32u/font.c
+index 8d2a44abbfd..237237291dc 100644
+--- a/dlls/win32u/font.c
++++ b/dlls/win32u/font.c
+@@ -4793,6 +4793,7 @@ const struct gdi_dc_funcs font_driver =
+     NULL,                           /* pUnrealizePalette */
+     NULL,                           /* pD3DKMTCheckVidPnExclusiveOwnership */
+     NULL,                           /* pD3DKMTCloseAdapter */
++    NULL,                           /* pD3DKMTEnumAdapters2 */
+     NULL,                           /* pD3DKMTOpenAdapterFromLuid */
+     NULL,                           /* pD3DKMTQueryVideoMemoryInfo */
+     NULL,                           /* pD3DKMTSetVidPnSourceOwner */
+diff --git a/dlls/win32u/gdiobj.c b/dlls/win32u/gdiobj.c
+index f88efbaa679..220c28f57d1 100644
+--- a/dlls/win32u/gdiobj.c
++++ b/dlls/win32u/gdiobj.c
+@@ -1048,6 +1048,7 @@ static struct unix_funcs unix_funcs =
+     NtGdiDdDDICreateDCFromMemory,
+     NtGdiDdDDIDestroyDCFromMemory,
+     NtGdiDdDDIDestroyDevice,
++    NtGdiDdDDIEnumAdapters2,
+     NtGdiDdDDIEscape,
+     NtGdiDdDDIOpenAdapterFromDeviceName,
+     NtGdiDdDDIOpenAdapterFromLuid,
+diff --git a/dlls/win32u/path.c b/dlls/win32u/path.c
+index 5490d885693..2e017c3cd1e 100644
+--- a/dlls/win32u/path.c
++++ b/dlls/win32u/path.c
+@@ -2121,6 +2121,7 @@ const struct gdi_dc_funcs path_driver =
+     NULL,                               /* pUnrealizePalette */
+     NULL,                               /* pD3DKMTCheckVidPnExclusiveOwnership */
+     NULL,                               /* pD3DKMTCloseAdapter */
++    NULL,                               /* pD3DKMTEnumAdapters2 */
+     NULL,                               /* pD3DKMTOpenAdapterFromLuid */
+     NULL,                               /* pD3DKMTQueryVideoMemoryInfo */
+     NULL,                               /* pD3DKMTSetVidPnSourceOwner */
+diff --git a/dlls/win32u/win32u.spec b/dlls/win32u/win32u.spec
+index 7b0629d9d65..2d87ddaaa6e 100644
+--- a/dlls/win32u/win32u.spec
++++ b/dlls/win32u/win32u.spec
+@@ -223,7 +223,7 @@
+ @ stub NtGdiDdDDIDispMgrSourceOperation
+ @ stub NtGdiDdDDIDispMgrTargetOperation
+ @ stub NtGdiDdDDIEnumAdapters
+-@ stub NtGdiDdDDIEnumAdapters2
++@ stdcall NtGdiDdDDIEnumAdapters2(ptr)
+ @ stdcall NtGdiDdDDIEscape(ptr)
+ @ stub NtGdiDdDDIEvict
+ @ stub NtGdiDdDDIExtractBundleObject
+diff --git a/dlls/win32u/win32u_private.h b/dlls/win32u/win32u_private.h
+index 3d1c7c99a43..cc2ca2e7629 100644
+--- a/dlls/win32u/win32u_private.h
++++ b/dlls/win32u/win32u_private.h
+@@ -61,6 +61,7 @@ struct unix_funcs
+     NTSTATUS (WINAPI *pNtGdiDdDDICreateDCFromMemory)( D3DKMT_CREATEDCFROMMEMORY *desc );
+     NTSTATUS (WINAPI *pNtGdiDdDDIDestroyDCFromMemory)( const D3DKMT_DESTROYDCFROMMEMORY *desc );
+     NTSTATUS (WINAPI *pNtGdiDdDDIDestroyDevice)( const D3DKMT_DESTROYDEVICE *desc );
++    NTSTATUS (WINAPI *pNtGdiDdDDIEnumAdapters2)( D3DKMT_ENUMADAPTERS2 *desc );
+     NTSTATUS (WINAPI *pNtGdiDdDDIEscape)( const D3DKMT_ESCAPE *desc );
+     NTSTATUS (WINAPI *pNtGdiDdDDIOpenAdapterFromDeviceName)( D3DKMT_OPENADAPTERFROMDEVICENAME *desc );
+     NTSTATUS (WINAPI *pNtGdiDdDDIOpenAdapterFromLuid)( D3DKMT_OPENADAPTERFROMLUID *desc );
+diff --git a/dlls/win32u/wrappers.c b/dlls/win32u/wrappers.c
+index e128705ef37..83a5cf81635 100644
+--- a/dlls/win32u/wrappers.c
++++ b/dlls/win32u/wrappers.c
+@@ -695,6 +695,12 @@ NTSTATUS WINAPI NtGdiDdDDIDestroyDevice( const D3DKMT_DESTROYDEVICE *desc )
+     return unix_funcs->pNtGdiDdDDIDestroyDevice( desc );
+ }
+ 
++NTSTATUS WINAPI NtGdiDdDDIEnumAdapters2( D3DKMT_ENUMADAPTERS2 *desc )
++{
++    if (!unix_funcs) return STATUS_NOT_SUPPORTED;
++    return unix_funcs->pNtGdiDdDDIEnumAdapters2( desc );
++}
++
+ NTSTATUS WINAPI NtGdiDdDDIEscape( const D3DKMT_ESCAPE *desc )
+ {
+     if (!unix_funcs) return STATUS_NOT_SUPPORTED;
+diff --git a/dlls/wineps.drv/init.c b/dlls/wineps.drv/init.c
+index 0d4467b6964..fc6af810a62 100644
+--- a/dlls/wineps.drv/init.c
++++ b/dlls/wineps.drv/init.c
+@@ -858,6 +858,7 @@ static const struct gdi_dc_funcs psdrv_funcs =
+     NULL,                               /* pUnrealizePalette */
+     NULL,                               /* pD3DKMTCheckVidPnExclusiveOwnership */
+     NULL,                               /* pD3DKMTCloseAdapter */
++    NULL,                               /* pD3DKMTEnumAdapters2 */
+     NULL,                               /* pD3DKMTOpenAdapterFromLuid */
+     NULL,                               /* pD3DKMTQueryVideoMemoryInfo */
+     NULL,                               /* pD3DKMTSetVidPnSourceOwner */
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+index b109882186f..8a380fd77f9 100644
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -389,6 +389,7 @@ static const struct user_driver_funcs x11drv_funcs =
+     .dc_funcs.pUnrealizePalette = X11DRV_UnrealizePalette,
+     .dc_funcs.pD3DKMTCheckVidPnExclusiveOwnership = X11DRV_D3DKMTCheckVidPnExclusiveOwnership,
+     .dc_funcs.pD3DKMTCloseAdapter = X11DRV_D3DKMTCloseAdapter,
++    .dc_funcs.pD3DKMTEnumAdapters2 = X11DRV_D3DKMTEnumAdapters2,
+     .dc_funcs.pD3DKMTOpenAdapterFromLuid = X11DRV_D3DKMTOpenAdapterFromLuid,
+     .dc_funcs.pD3DKMTQueryVideoMemoryInfo = X11DRV_D3DKMTQueryVideoMemoryInfo,
+     .dc_funcs.pD3DKMTSetVidPnSourceOwner = X11DRV_D3DKMTSetVidPnSourceOwner,
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+index e372b88ba8d..32a9653d11f 100644
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -162,6 +162,7 @@ extern BOOL CDECL X11DRV_Chord( PHYSDEV dev, INT left, INT top, INT right, INT b
+                                 INT xstart, INT ystart, INT xend, INT yend ) DECLSPEC_HIDDEN;
+ extern NTSTATUS CDECL X11DRV_D3DKMTCheckVidPnExclusiveOwnership( const D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP *desc ) DECLSPEC_HIDDEN;
+ extern NTSTATUS CDECL X11DRV_D3DKMTCloseAdapter( const D3DKMT_CLOSEADAPTER *desc ) DECLSPEC_HIDDEN;
++extern NTSTATUS CDECL X11DRV_D3DKMTEnumAdapters2( D3DKMT_ENUMADAPTERS2 *desc ) DECLSPEC_HIDDEN;
+ extern NTSTATUS CDECL X11DRV_D3DKMTOpenAdapterFromLuid( D3DKMT_OPENADAPTERFROMLUID *desc ) DECLSPEC_HIDDEN;
+ extern NTSTATUS CDECL X11DRV_D3DKMTQueryVideoMemoryInfo( D3DKMT_QUERYVIDEOMEMORYINFO *desc ) DECLSPEC_HIDDEN;
+ extern NTSTATUS CDECL X11DRV_D3DKMTSetVidPnSourceOwner( const D3DKMT_SETVIDPNSOURCEOWNER *desc ) DECLSPEC_HIDDEN;
+diff --git a/dlls/winex11.drv/x11drv_main.c b/dlls/winex11.drv/x11drv_main.c
+index d1257701b9d..e2fd43362b3 100644
+--- a/dlls/winex11.drv/x11drv_main.c
++++ b/dlls/winex11.drv/x11drv_main.c
+@@ -1190,6 +1190,243 @@ static void release_display_device_init_mutex(HANDLE mutex)
+     NtClose( mutex );
+ }
+ 
++/* Find the Vulkan device LUID corresponding to a GUID */
++static BOOL get_vulkan_luid_from_uuid( const GUID *uuid, LUID *luid )
++{
++    static const WCHAR class_guidW[] = {'C','l','a','s','s','G','U','I','D',0};
++    static const WCHAR devpropkey_gpu_vulkan_uuidW[] =
++    {
++        'P','r','o','p','e','r','t','i','e','s',
++        '\\','{','2','3','3','A','9','E','F','3','-','A','F','C','4','-','4','A','B','D',
++        '-','B','5','6','4','-','C','3','2','F','2','1','F','1','5','3','5','C','}',
++        '\\','0','0','0','2'
++    };
++    static const WCHAR devpropkey_gpu_luidW[] =
++    {
++        'P','r','o','p','e','r','t','i','e','s',
++        '\\','{','6','0','B','1','9','3','C','B','-','5','2','7','6','-','4','D','0','F',
++        '-','9','6','F','C','-','F','1','7','3','A','B','A','D','3','E','C','6','}',
++        '\\','0','0','0','2'
++    };
++    static const WCHAR guid_devclass_displayW[] =
++        {'{','4','D','3','6','E','9','6','8','-','E','3','2','5','-','1','1','C','E','-',
++         'B','F','C','1','-','0','8','0','0','2','B','E','1','0','3','1','8','}',0};
++    static const WCHAR pci_keyW[] =
++    {
++        '\\','R','e','g','i','s','t','r','y',
++        '\\','M','a','c','h','i','n','e',
++        '\\','S','y','s','t','e','m',
++        '\\','C','u','r','r','e','n','t','C','o','n','t','r','o','l','S','e','t',
++        '\\','E','n','u','m',
++        '\\','P','C','I'
++    };
++    char buffer[4096];
++    KEY_VALUE_PARTIAL_INFORMATION *value = (void *)buffer;
++    HKEY subkey, device_key, prop_key, pci_key;
++    KEY_NODE_INFORMATION *key = (void *)buffer;
++    DWORD size, i = 0;
++    HANDLE mutex;
++
++    mutex = get_display_device_init_mutex();
++
++    pci_key = reg_open_key(NULL, pci_keyW, sizeof(pci_keyW));
++    while (!NtEnumerateKey(pci_key, i++, KeyNodeInformation, key, sizeof(buffer), &size))
++    {
++        unsigned int j = 0;
++
++        if (!(subkey = reg_open_key(pci_key, key->Name, key->NameLength)))
++            continue;
++
++        while (!NtEnumerateKey(subkey, j++, KeyNodeInformation, key, sizeof(buffer), &size))
++        {
++            if (!(device_key = reg_open_key(subkey, key->Name, key->NameLength)))
++                continue;
++
++            size = query_reg_value(device_key, class_guidW, value, sizeof(buffer));
++            if (size != sizeof(guid_devclass_displayW) ||
++                wcscmp((WCHAR *)value->Data, guid_devclass_displayW))
++            {
++                NtClose(device_key);
++                continue;
++            }
++
++            if (!(prop_key = reg_open_key(device_key, devpropkey_gpu_vulkan_uuidW,
++                                          sizeof(devpropkey_gpu_vulkan_uuidW))))
++            {
++                NtClose(device_key);
++                continue;
++            }
++
++            size = query_reg_value(prop_key, NULL, value, sizeof(buffer));
++            NtClose(prop_key);
++            if (size != sizeof(GUID) || memcmp(value->Data, uuid, sizeof(GUID)))
++            {
++                NtClose(device_key);
++                continue;
++            }
++
++            if (!(prop_key = reg_open_key(device_key, devpropkey_gpu_luidW,
++                                          sizeof(devpropkey_gpu_luidW))))
++            {
++                NtClose(device_key);
++                continue;
++            }
++
++            size = query_reg_value(prop_key, NULL, value, sizeof(buffer));
++            NtClose(prop_key);
++            if (size != sizeof(LUID))
++            {
++                NtClose(device_key);
++                continue;
++            }
++
++            *luid = *(const LUID *)value->Data;
++            NtClose(device_key);
++            NtClose(subkey);
++            NtClose(pci_key);
++            release_display_device_init_mutex(mutex);
++            return TRUE;
++        }
++        NtClose(subkey);
++    }
++    NtClose(pci_key);
++
++    release_display_device_init_mutex(mutex);
++    return FALSE;
++}
++
++NTSTATUS CDECL X11DRV_D3DKMTEnumAdapters2( D3DKMT_ENUMADAPTERS2 *desc )
++{
++    static const char *extensions[] =
++    {
++        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
++        VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
++    };
++    const struct vulkan_funcs *vulkan_funcs;
++    PFN_vkGetPhysicalDeviceProperties2KHR pvkGetPhysicalDeviceProperties2KHR;
++    PFN_vkEnumeratePhysicalDevices pvkEnumeratePhysicalDevices;
++    VkPhysicalDevice *vk_physical_devices = NULL;
++    VkPhysicalDeviceProperties2 properties2;
++    NTSTATUS status = STATUS_UNSUCCESSFUL;
++    UINT device_count = 0, device_idx = 0;
++    struct x11_d3dkmt_adapter *adapter;
++    VkInstanceCreateInfo create_info;
++    VkPhysicalDeviceIDProperties id;
++    VkResult vr;
++    LUID luid;
++
++    if (!(vulkan_funcs = get_vulkan_driver(WINE_VULKAN_DRIVER_VERSION)))
++    {
++        WARN("Vulkan is unavailable.\n");
++        return STATUS_UNSUCCESSFUL;
++    }
++
++    pthread_mutex_lock(&d3dkmt_mutex);
++
++    if (!d3dkmt_vk_instance)
++    {
++        memset(&create_info, 0, sizeof(create_info));
++        create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
++        create_info.enabledExtensionCount = ARRAY_SIZE(extensions);
++        create_info.ppEnabledExtensionNames = extensions;
++
++        vr = vulkan_funcs->p_vkCreateInstance(&create_info, NULL, &d3dkmt_vk_instance);
++        if (vr != VK_SUCCESS)
++        {
++            WARN("Failed to create a Vulkan instance, vr %d.\n", vr);
++            goto done;
++        }
++    }
++
++#define LOAD_VK_FUNC(f)                                                                  \
++    if (!(p##f = (void *)vulkan_funcs->p_vkGetInstanceProcAddr(d3dkmt_vk_instance, #f))) \
++    {                                                                                    \
++        WARN("Failed to load " #f ".\n");                                                \
++        goto done;                                                                       \
++    }
++
++    LOAD_VK_FUNC(vkEnumeratePhysicalDevices)
++    LOAD_VK_FUNC(vkGetPhysicalDeviceProperties2KHR)
++#undef LOAD_VK_FUNC
++
++    vr = pvkEnumeratePhysicalDevices(d3dkmt_vk_instance, &device_count, NULL);
++    if (vr != VK_SUCCESS || !device_count)
++    {
++        WARN("No Vulkan device found, vr %d, device_count %d.\n", vr, device_count);
++        goto done;
++    }
++
++    if (!desc->pAdapters)
++    {
++        status = STATUS_SUCCESS;
++        goto done;
++    }
++    else if (desc->NumAdapters < device_count)
++    {
++        status = STATUS_BUFFER_TOO_SMALL;
++        goto done;
++    }
++
++    if (!(vk_physical_devices = calloc(device_count, sizeof(*vk_physical_devices))))
++    {
++        status = STATUS_NO_MEMORY;
++        goto done;
++    }
++
++    vr = pvkEnumeratePhysicalDevices(d3dkmt_vk_instance, &device_count, vk_physical_devices);
++    if (vr != VK_SUCCESS)
++    {
++        WARN("vkEnumeratePhysicalDevices failed, vr %d.\n", vr);
++        goto done;
++    }
++
++    for (device_idx = 0; device_idx < device_count; ++device_idx)
++    {
++        memset(&id, 0, sizeof(id));
++        id.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
++        properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++        properties2.pNext = &id;
++
++        pvkGetPhysicalDeviceProperties2KHR(vk_physical_devices[device_idx], &properties2);
++
++        if (!(adapter = malloc(sizeof(*adapter))))
++        {
++            status = STATUS_NO_MEMORY;
++            goto done;
++        }
++
++        adapter->handle = desc->pAdapters[device_idx].hAdapter;
++        adapter->vk_device = vk_physical_devices[device_idx];
++        list_add_tail(&x11_d3dkmt_adapters, &adapter->entry);
++
++        if (get_vulkan_luid_from_uuid((const GUID *)id.deviceUUID, &luid))
++        {
++            memcpy(&desc->pAdapters[device_idx].AdapterLuid, &luid, sizeof(LUID));
++        }
++        else
++        {
++            WARN("get_vulkan_luid_from_uuid failed, AdapterLuid will remain empty.\n");
++            memset(&desc->pAdapters[device_idx].AdapterLuid, 0, sizeof(LUID));
++        }
++
++        desc->pAdapters[device_idx].NumOfSources = 1;
++        desc->pAdapters[device_idx].bPrecisePresentRegionsPreferred = FALSE;
++    }
++
++    status = STATUS_SUCCESS;
++
++done:
++    desc->NumAdapters = device_count;
++    if (d3dkmt_vk_instance && list_empty(&x11_d3dkmt_adapters))
++    {
++        vulkan_funcs->p_vkDestroyInstance(d3dkmt_vk_instance, NULL);
++        d3dkmt_vk_instance = NULL;
++    }
++    pthread_mutex_unlock(&d3dkmt_mutex);
++    free(vk_physical_devices);
++    return status;
++}
++
+ /* Find the Vulkan device UUID corresponding to a LUID */
+ static BOOL get_vulkan_uuid_from_luid( const LUID *luid, GUID *uuid )
+ {
+diff --git a/dlls/winex11.drv/xrender.c b/dlls/winex11.drv/xrender.c
+index 718c9b6ea60..02e491237c7 100644
+--- a/dlls/winex11.drv/xrender.c
++++ b/dlls/winex11.drv/xrender.c
+@@ -2341,6 +2341,7 @@ static const struct gdi_dc_funcs xrender_funcs =
+     NULL,                               /* pUnrealizePalette */
+     NULL,                               /* pD3DKMTCheckVidPnExclusiveOwnership */
+     NULL,                               /* pD3DKMTCloseAdapter */
++    NULL,                               /* pD3DKMTEnumAdapters2 */
+     NULL,                               /* pD3DKMTOpenAdapterFromLuid */
+     NULL,                               /* pD3DKMTQueryVideoMemoryInfo */
+     NULL,                               /* pD3DKMTSetVidPnSourceOwner */
+diff --git a/include/ddk/d3dkmthk.h b/include/ddk/d3dkmthk.h
+index b65fcb8c9c6..207d9c3572d 100644
+--- a/include/ddk/d3dkmthk.h
++++ b/include/ddk/d3dkmthk.h
+@@ -155,6 +155,8 @@ typedef struct _D3DKMT_CLOSEADAPTER
+     D3DKMT_HANDLE hAdapter;
+ } D3DKMT_CLOSEADAPTER;
+ 
++
++
+ typedef struct _D3DKMT_CREATEDCFROMMEMORY
+ {
+     void *pMemory;
+@@ -667,6 +669,20 @@ typedef struct _D3DKMT_ESCAPE
+     D3DKMT_HANDLE      hContext;
+ } D3DKMT_ESCAPE;
+ 
++typedef struct _D3DKMT_ADAPTERINFO
++{
++  D3DKMT_HANDLE hAdapter;
++  LUID          AdapterLuid;
++  ULONG         NumOfSources;
++  BOOL          bPrecisePresentRegionsPreferred;
++} D3DKMT_ADAPTERINFO;
++
++typedef struct _D3DKMT_ENUMADAPTERS2
++{
++  ULONG               NumAdapters;
++  D3DKMT_ADAPTERINFO *pAdapters;
++} D3DKMT_ENUMADAPTERS2;
++
+ #ifdef __cplusplus
+ extern "C"
+ {
+@@ -678,6 +694,7 @@ NTSTATUS WINAPI D3DKMTCreateDevice(D3DKMT_CREATEDEVICE *desc);
+ NTSTATUS WINAPI D3DKMTCreateDCFromMemory(D3DKMT_CREATEDCFROMMEMORY *desc);
+ NTSTATUS WINAPI D3DKMTDestroyDCFromMemory(const D3DKMT_DESTROYDCFROMMEMORY *desc);
+ NTSTATUS WINAPI D3DKMTDestroyDevice(const D3DKMT_DESTROYDEVICE *desc);
++NTSTATUS WINAPI D3DKMTEnumAdapters2(D3DKMT_ENUMADAPTERS2 *desc);
+ NTSTATUS WINAPI D3DKMTEscape( const D3DKMT_ESCAPE *desc );
+ NTSTATUS WINAPI D3DKMTOpenAdapterFromGdiDisplayName(D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME *desc);
+ NTSTATUS WINAPI D3DKMTOpenAdapterFromHdc( D3DKMT_OPENADAPTERFROMHDC *desc );
+diff --git a/include/ntgdi.h b/include/ntgdi.h
+index 1aa5cad468f..c5d97b1b56c 100644
+--- a/include/ntgdi.h
++++ b/include/ntgdi.h
+@@ -472,6 +472,7 @@ NTSTATUS WINAPI NtGdiDdDDICreateDCFromMemory( D3DKMT_CREATEDCFROMMEMORY *desc );
+ NTSTATUS WINAPI NtGdiDdDDICreateDevice( D3DKMT_CREATEDEVICE *desc );
+ NTSTATUS WINAPI NtGdiDdDDIDestroyDCFromMemory( const D3DKMT_DESTROYDCFROMMEMORY *desc );
+ NTSTATUS WINAPI NtGdiDdDDIDestroyDevice( const D3DKMT_DESTROYDEVICE *desc );
++NTSTATUS WINAPI NtGdiDdDDIEnumAdapters2( D3DKMT_ENUMADAPTERS2 *desc );
+ NTSTATUS WINAPI NtGdiDdDDIEscape( const D3DKMT_ESCAPE *desc );
+ NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromHdc( D3DKMT_OPENADAPTERFROMHDC *desc );
+ NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromDeviceName( D3DKMT_OPENADAPTERFROMDEVICENAME *desc );
+diff --git a/include/wine/gdi_driver.h b/include/wine/gdi_driver.h
+index 60c3779727b..b4e3c38e128 100644
+--- a/include/wine/gdi_driver.h
++++ b/include/wine/gdi_driver.h
+@@ -160,6 +160,7 @@ struct gdi_dc_funcs
+     BOOL     (CDECL *pUnrealizePalette)(HPALETTE);
+     NTSTATUS (CDECL *pD3DKMTCheckVidPnExclusiveOwnership)(const D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP *);
+     NTSTATUS (CDECL *pD3DKMTCloseAdapter)(const D3DKMT_CLOSEADAPTER *);
++    NTSTATUS (CDECL *pD3DKMTEnumAdapters2)(D3DKMT_ENUMADAPTERS2 *);
+     NTSTATUS (CDECL *pD3DKMTOpenAdapterFromLuid)(D3DKMT_OPENADAPTERFROMLUID *);
+     NTSTATUS (CDECL *pD3DKMTQueryVideoMemoryInfo)(D3DKMT_QUERYVIDEOMEMORYINFO *);
+     NTSTATUS (CDECL *pD3DKMTSetVidPnSourceOwner)(const D3DKMT_SETVIDPNSOURCEOWNER *);
+-- 
+2.43.0
+
+
+From 92636f06776d676a29779ff0bb9b133826075a99 Mon Sep 17 00:00:00 2001
+From: FakeMichau <49685661+FakeMichau@users.noreply.github.com>
+Date: Tue, 16 Jan 2024 23:39:14 +0100
+Subject: [PATCH 2/2] hags 0002
+
+---
+ dlls/gdi32/gdi32.spec   |   1 +
+ dlls/win32u/driver.c    |  42 ++++++++++++++++
+ dlls/win32u/syscall.c   |   1 +
+ dlls/win32u/win32u.spec |   2 +-
+ include/ddk/d3dkmthk.h  | 108 ++++++++++++++++++++++++++++++++++++++++
+ include/ntgdi.h         |   1 +
+ 6 files changed, 154 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/gdi32/gdi32.spec b/dlls/gdi32/gdi32.spec
+index 363c424aafc..dc424fda011 100644
+--- a/dlls/gdi32/gdi32.spec
++++ b/dlls/gdi32/gdi32.spec
+@@ -85,6 +85,7 @@
+ @ stdcall D3DKMTOpenAdapterFromGdiDisplayName(ptr)
+ @ stdcall D3DKMTOpenAdapterFromHdc(ptr) win32u.NtGdiDdDDIOpenAdapterFromHdc
+ @ stdcall D3DKMTOpenAdapterFromLuid(ptr) win32u.NtGdiDdDDIOpenAdapterFromLuid
++@ stdcall D3DKMTQueryAdapterInfo(ptr) win32u.NtGdiDdDDIQueryAdapterInfo
+ @ stdcall D3DKMTQueryStatistics(ptr) win32u.NtGdiDdDDIQueryStatistics
+ @ stdcall D3DKMTQueryVideoMemoryInfo(ptr) win32u.NtGdiDdDDIQueryVideoMemoryInfo
+ @ stdcall D3DKMTSetQueuedLimit(ptr) win32u.NtGdiDdDDISetQueuedLimit
+diff --git a/dlls/win32u/driver.c b/dlls/win32u/driver.c
+index 16bb5f778b7..643a1230b9a 100644
+--- a/dlls/win32u/driver.c
++++ b/dlls/win32u/driver.c
+@@ -1587,6 +1587,48 @@ NTSTATUS WINAPI NtGdiDdDDIDestroyDevice( const D3DKMT_DESTROYDEVICE *desc )
+     return status;
+ }
+ 
++static BOOL check_hags_enabled( void )
++{
++    const char *winehags = getenv( "WINEHAGS" );
++    return winehags && *winehags != '0';
++}
++
++/******************************************************************************
++ *           NtGdiDdDDIQueryAdapterInfo    (win32u.@)
++ */
++NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
++{
++    D3DKMT_WDDM_2_7_CAPS *d3dkmt_wddm_2_7_caps;
++
++    TRACE("desc %p, type %d\n", desc, desc->Type);
++
++    switch (desc->Type)
++    {
++        case KMTQAITYPE_WDDM_2_7_CAPS:
++            if (!desc->pPrivateDriverData || desc->PrivateDriverDataSize != sizeof(D3DKMT_WDDM_2_7_CAPS))
++                return STATUS_INVALID_PARAMETER;
++
++            d3dkmt_wddm_2_7_caps = desc->pPrivateDriverData;
++            d3dkmt_wddm_2_7_caps->HwSchSupported = 1;
++            d3dkmt_wddm_2_7_caps->HwSchEnabled = 0;
++            d3dkmt_wddm_2_7_caps->HwSchEnabledByDefault = 0;
++            d3dkmt_wddm_2_7_caps->IndependentVidPnVSyncControl = 0;
++
++            if (check_hags_enabled())
++            {
++                d3dkmt_wddm_2_7_caps->HwSchEnabled = 1;
++                d3dkmt_wddm_2_7_caps->HwSchEnabledByDefault = 1;
++            }
++            break;
++
++        default:
++            FIXME("type %d not supported\n", desc->Type);
++            return STATUS_NOT_IMPLEMENTED;
++    }
++
++    return STATUS_SUCCESS;
++}
++
+ /******************************************************************************
+  *           NtGdiDdDDIQueryStatistics    (win32u.@)
+  */
+diff --git a/dlls/win32u/syscall.c b/dlls/win32u/syscall.c
+index 3581bc4c27d..159fc158635 100644
+--- a/dlls/win32u/syscall.c
++++ b/dlls/win32u/syscall.c
+@@ -54,6 +54,7 @@ static void * const syscalls[] =
+     NtGdiCreateSolidBrush,
+     NtGdiDdDDICreateDevice,
+     NtGdiDdDDIOpenAdapterFromHdc,
++    NtGdiDdDDIQueryAdapterInfo,
+     NtGdiDdDDIQueryStatistics,
+     NtGdiDdDDISetQueuedLimit,
+     NtGdiDeleteClientObj,
+diff --git a/dlls/win32u/win32u.spec b/dlls/win32u/win32u.spec
+index 2d87ddaaa6e..1c4597168cf 100644
+--- a/dlls/win32u/win32u.spec
++++ b/dlls/win32u/win32u.spec
+@@ -295,7 +295,7 @@
+ @ stub NtGdiDdDDIPresentMultiPlaneOverlay2
+ @ stub NtGdiDdDDIPresentMultiPlaneOverlay3
+ @ stub NtGdiDdDDIPresentRedirected
+-@ stub NtGdiDdDDIQueryAdapterInfo
++@ stdcall -syscall NtGdiDdDDIQueryAdapterInfo(ptr)
+ @ stub NtGdiDdDDIQueryAllocationResidency
+ @ stub NtGdiDdDDIQueryClockCalibration
+ @ stub NtGdiDdDDIQueryFSEBlock
+diff --git a/include/ddk/d3dkmthk.h b/include/ddk/d3dkmthk.h
+index 207d9c3572d..6bf1c80c1de 100644
+--- a/include/ddk/d3dkmthk.h
++++ b/include/ddk/d3dkmthk.h
+@@ -683,6 +683,114 @@ typedef struct _D3DKMT_ENUMADAPTERS2
+   D3DKMT_ADAPTERINFO *pAdapters;
+ } D3DKMT_ENUMADAPTERS2;
+ 
++typedef enum _KMTQUERYADAPTERINFOTYPE
++{
++    KMTQAITYPE_UMDRIVERPRIVATE,
++    KMTQAITYPE_UMDRIVERNAME,
++    KMTQAITYPE_UMOPENGLINFO,
++    KMTQAITYPE_GETSEGMENTSIZE,
++    KMTQAITYPE_ADAPTERGUID,
++    KMTQAITYPE_FLIPQUEUEINFO,
++    KMTQAITYPE_ADAPTERADDRESS,
++    KMTQAITYPE_SETWORKINGSETINFO,
++    KMTQAITYPE_ADAPTERREGISTRYINFO,
++    KMTQAITYPE_CURRENTDISPLAYMODE,
++    KMTQAITYPE_MODELIST,
++    KMTQAITYPE_CHECKDRIVERUPDATESTATUS,
++    KMTQAITYPE_VIRTUALADDRESSINFO,
++    KMTQAITYPE_DRIVERVERSION,
++    KMTQAITYPE_ADAPTERTYPE,
++    KMTQAITYPE_OUTPUTDUPLCONTEXTSCOUNT,
++    KMTQAITYPE_WDDM_1_2_CAPS,
++    KMTQAITYPE_UMD_DRIVER_VERSION,
++    KMTQAITYPE_DIRECTFLIP_SUPPORT,
++    KMTQAITYPE_MULTIPLANEOVERLAY_SUPPORT,
++    KMTQAITYPE_DLIST_DRIVER_NAME,
++    KMTQAITYPE_WDDM_1_3_CAPS,
++    KMTQAITYPE_MULTIPLANEOVERLAY_HUD_SUPPORT,
++    KMTQAITYPE_WDDM_2_0_CAPS,
++    KMTQAITYPE_NODEMETADATA,
++    KMTQAITYPE_CPDRIVERNAME,
++    KMTQAITYPE_XBOX,
++    KMTQAITYPE_INDEPENDENTFLIP_SUPPORT,
++    KMTQAITYPE_MIRACASTCOMPANIONDRIVERNAME,
++    KMTQAITYPE_PHYSICALADAPTERCOUNT,
++    KMTQAITYPE_PHYSICALADAPTERDEVICEIDS,
++    KMTQAITYPE_DRIVERCAPS_EXT,
++    KMTQAITYPE_QUERY_MIRACAST_DRIVER_TYPE,
++    KMTQAITYPE_QUERY_GPUMMU_CAPS,
++    KMTQAITYPE_QUERY_MULTIPLANEOVERLAY_DECODE_SUPPORT,
++    KMTQAITYPE_QUERY_HW_PROTECTION_TEARDOWN_COUNT,
++    KMTQAITYPE_QUERY_ISBADDRIVERFORHWPROTECTIONDISABLED,
++    KMTQAITYPE_MULTIPLANEOVERLAY_SECONDARY_SUPPORT,
++    KMTQAITYPE_INDEPENDENTFLIP_SECONDARY_SUPPORT,
++    KMTQAITYPE_PANELFITTER_SUPPORT,
++    KMTQAITYPE_PHYSICALADAPTERPNPKEY,
++    KMTQAITYPE_GETSEGMENTGROUPSIZE,
++    KMTQAITYPE_MPO3DDI_SUPPORT,
++    KMTQAITYPE_HWDRM_SUPPORT,
++    KMTQAITYPE_MPOKERNELCAPS_SUPPORT,
++    KMTQAITYPE_MULTIPLANEOVERLAY_STRETCH_SUPPORT,
++    KMTQAITYPE_GET_DEVICE_VIDPN_OWNERSHIP_INFO,
++    KMTQAITYPE_QUERYREGISTRY,
++    KMTQAITYPE_KMD_DRIVER_VERSION,
++    KMTQAITYPE_BLOCKLIST_KERNEL,
++    KMTQAITYPE_BLOCKLIST_RUNTIME,
++    KMTQAITYPE_ADAPTERGUID_RENDER,
++    KMTQAITYPE_ADAPTERADDRESS_RENDER,
++    KMTQAITYPE_ADAPTERREGISTRYINFO_RENDER,
++    KMTQAITYPE_CHECKDRIVERUPDATESTATUS_RENDER,
++    KMTQAITYPE_DRIVERVERSION_RENDER,
++    KMTQAITYPE_ADAPTERTYPE_RENDER,
++    KMTQAITYPE_WDDM_1_2_CAPS_RENDER,
++    KMTQAITYPE_WDDM_1_3_CAPS_RENDER,
++    KMTQAITYPE_QUERY_ADAPTER_UNIQUE_GUID,
++    KMTQAITYPE_NODEPERFDATA,
++    KMTQAITYPE_ADAPTERPERFDATA,
++    KMTQAITYPE_ADAPTERPERFDATA_CAPS,
++    KMTQUITYPE_GPUVERSION,
++    KMTQAITYPE_DRIVER_DESCRIPTION,
++    KMTQAITYPE_DRIVER_DESCRIPTION_RENDER,
++    KMTQAITYPE_SCANOUT_CAPS,
++    KMTQAITYPE_DISPLAY_UMDRIVERNAME,
++    KMTQAITYPE_PARAVIRTUALIZATION_RENDER,
++    KMTQAITYPE_SERVICENAME,
++    KMTQAITYPE_WDDM_2_7_CAPS,
++    KMTQAITYPE_TRACKEDWORKLOAD_SUPPORT,
++    KMTQAITYPE_HYBRID_DLIST_DLL_SUPPORT,
++    KMTQAITYPE_DISPLAY_CAPS,
++    KMTQAITYPE_WDDM_2_9_CAPS,
++    KMTQAITYPE_CROSSADAPTERRESOURCE_SUPPORT,
++    KMTQAITYPE_WDDM_3_0_CAPS,
++    KMTQAITYPE_WSAUMDIMAGENAME,
++    KMTQAITYPE_VGPUINTERFACEID,
++    KMTQAITYPE_WDDM_3_1_CAPS
++} KMTQUERYADAPTERINFOTYPE;
++
++typedef struct _D3DKMT_QUERYADAPTERINFO
++{
++    D3DKMT_HANDLE           hAdapter;
++    KMTQUERYADAPTERINFOTYPE Type;
++    VOID                    *pPrivateDriverData;
++    UINT                    PrivateDriverDataSize;
++} D3DKMT_QUERYADAPTERINFO;
++
++typedef struct _D3DKMT_WDDM_2_7_CAPS
++{
++  union
++  {
++    struct
++    {
++      UINT HwSchSupported               :  1;
++      UINT HwSchEnabled                 :  1;
++      UINT HwSchEnabledByDefault        :  1;
++      UINT IndependentVidPnVSyncControl :  1;
++      UINT Reserved                     : 28;
++    };
++    UINT Value;
++  };
++} D3DKMT_WDDM_2_7_CAPS;
++
+ #ifdef __cplusplus
+ extern "C"
+ {
+diff --git a/include/ntgdi.h b/include/ntgdi.h
+index c5d97b1b56c..a8d73bf9011 100644
+--- a/include/ntgdi.h
++++ b/include/ntgdi.h
+@@ -477,6 +477,7 @@ NTSTATUS WINAPI NtGdiDdDDIEscape( const D3DKMT_ESCAPE *desc );
+ NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromHdc( D3DKMT_OPENADAPTERFROMHDC *desc );
+ NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromDeviceName( D3DKMT_OPENADAPTERFROMDEVICENAME *desc );
+ NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromLuid( D3DKMT_OPENADAPTERFROMLUID *desc );
++NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc );
+ NTSTATUS WINAPI NtGdiDdDDIQueryStatistics( D3DKMT_QUERYSTATISTICS *stats );
+ NTSTATUS WINAPI NtGdiDdDDIQueryVideoMemoryInfo( D3DKMT_QUERYVIDEOMEMORYINFO *desc );
+ NTSTATUS WINAPI NtGdiDdDDISetQueuedLimit( D3DKMT_SETQUEUEDLIMIT *desc );
+-- 
+2.43.0
+

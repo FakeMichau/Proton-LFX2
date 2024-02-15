@@ -1,0 +1,130 @@
+--- a/proton
++++ b/proton
+@@ -414,6 +414,7 @@
+         self.bin_dir = self.path("files/bin/")
+         self.lib_dir = self.path("files/lib/")
+         self.lib64_dir = self.path("files/lib64/")
++        self.upscalers_dir = self.path("files/upscalers/")
+         self.fonts_dir = self.path("files/share/fonts/")
+         self.wine_fonts_dir = self.path("files/share/wine/fonts/")
+         self.wine_inf = self.path("files/share/wine/wine.inf")
+@@ -800,6 +801,8 @@
+             # collect configuration info
+             steamdir = os.environ["STEAM_COMPAT_CLIENT_INSTALL_PATH"]
+ 
++            use_upscaler = "PROTON_UPSCALER" in os.environ and nonzero(os.environ["PROTON_UPSCALER"])
++
+             use_wined3d = "wined3d" in g_session.compat_config
+             use_dxvk_dxgi = not use_wined3d and \
+                     not ("WINEDLLOVERRIDES" in g_session.env and "dxgi=b" in g_session.env["WINEDLLOVERRIDES"])
+@@ -843,6 +846,7 @@
+                 g_proton.fonts_dir,
+                 g_proton.lib_dir,
+                 g_proton.lib64_dir,
++                g_proton.upscalers_dir,
+                 steamdir,
+                 getmtimestr(steamdir, 'legacycompat', 'steamclient.dll'),
+                 getmtimestr(steamdir, 'legacycompat', 'steamclient64.dll'),
+@@ -853,6 +857,7 @@
+                 str(use_dxvk_dxgi),
+                 builtin_dll_copy,
+                 str(use_nvapi),
++                str(use_upscaler),
+             ))
+ 
+             # check whether any prefix config has changed
+@@ -957,6 +962,11 @@
+                             prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                     g_session.dlloverrides[f] = "n"
+ 
++                try_copy(g_proton.lib64_dir + "wine/lfx2/latencyflex2_rust.dll", "drive_c/windows/system32",
++                        prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
++                try_copy(g_proton.lib_dir + "wine/lfx2/latencyflex2_rust.dll", "drive_c/windows/syswow64",
++                        prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
++
+                 # If the user requested the NVAPI be available, copy it into place.
+                 # If they didn't, clean up any stray nvapi DLLs.
+                 if use_nvapi:
+@@ -982,11 +992,59 @@
+                 # Try to detect known DLLs that ship with the NVIDIA Linux Driver
+                 # and add them into the prefix
+                 nvidia_wine_dll_dir = find_nvidia_wine_dll_dir()
+-                if nvidia_wine_dll_dir:
++                if nvidia_wine_dll_dir and not use_upscaler:
+                     for dll in ["_nvngx.dll", "nvngx.dll"]:
+                         try_copy(nvidia_wine_dll_dir + "/" + dll, "drive_c/windows/system32", optional=True,
+                                  prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+ 
++                if use_upscaler:
++                    # very hacky way to do that
++                    # but that way there's no need to call wine early
++                    # it's needed so that nvngx.dll is loaded
++                    with open(os.path.join(self.prefix_dir, "system.reg"), 'rt+') as system_reg:
++                        count = 0
++                        for line in system_reg:
++                            count += "41FCC608-8496-4DEF-B43E-7D9BD675A6FF" in line
++                        if count < 2:
++                            system_reg.writelines([
++                                '\n[System\\\\ControlSet001\\\\Services\\\\nvlddmkm] 1699294680\n',
++                                '#time=1da10dd9364206e\n',
++                                '"{41FCC608-8496-4DEF-B43E-7D9BD675A6FF}"=hex:01\n',
++                                '\n',
++                                '[Software\\\\NVIDIA Corporation\\\\Global] 1699294680\n',
++                                '#time=1da10dd93641b32\n',
++                                '"{41FCC608-8496-4DEF-B43E-7D9BD675A6FF}"=hex:01\n'
++                            ])
++
++                    upscaler_to_use = os.environ["PROTON_UPSCALER"]
++                    upscaler_dir = os.path.join(g_proton.upscalers_dir, upscaler_to_use)
++                    if os.path.exists(upscaler_dir): 
++                        files = os.listdir(upscaler_dir)
++                        if [file for file in files if file.endswith('.dll')]:
++                            for f in files:
++                                try_copy(os.path.join(upscaler_dir, f), "drive_c/windows/system32",
++                                        prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
++                            sys.stderr.write("Upscaler: Using PROTON_UPSCALER=" + upscaler_to_use + os.linesep)
++                        else:
++                            sys.stderr.write("Upscaler: No DLL file found in the given folder" + os.linesep)
++                    else:
++                        sys.stderr.write("Upscaler: Folder " + upscaler_to_use + " doesn't exist" + os.linesep)
++                    sys.stderr.flush()
++                else:
++                    files_to_remove = []
++                    if os.path.exists(g_proton.upscalers_dir):
++                        upscalers = os.listdir(g_proton.upscalers_dir)
++                        for upscaler in upscalers:
++                            upscaler = os.path.join(g_proton.upscalers_dir, upscaler)
++                            for file in os.listdir(upscaler):
++                                files_to_remove.append(file)
++                    files_to_remove = list(set(files_to_remove))
++                    for file in files_to_remove:
++                        path_to_remove = self.prefix_dir + "drive_c/windows/system32/" + file
++                        if file_exists(path_to_remove, follow_symlinks=False):
++                            os.unlink(path_to_remove)
++
++
+             setup_game_dir_drive()
+             setup_steam_dir_drive()
+ 
+@@ -1453,6 +1511,8 @@
+         self.check_environment("PROTON_ENABLE_NVAPI", "enablenvapi")
+         self.check_environment("PROTON_FORCE_NVAPI", "forcenvapi")
+         self.check_environment("PROTON_ENABLE_AMD_AGS", "enableamdags")
++        self.check_environment("LFX2", "forcelfx2")
++        self.check_environment("LFX2", "enablenvapi")
+ 
+         if "noesync" in self.compat_config:
+             self.env.pop("WINEESYNC", "")
+@@ -1595,6 +1655,12 @@
+                 s = dll + "=" + setting
+         append_to_env_str(self.env, "WINEDLLOVERRIDES", s, ";")
+ 
++        #enable lfx2
++        if "forcelfx2" in self.compat_config:
++            self.env["DXVK_NVAPI_DRIVER_VERSION"] = "53713"
++            self.env["DXVK_NVAPI_ALLOW_OTHER_DRIVERS"] = "1"
++            self.env["DXVK_CONFIG"] = "dxgi.customVendorId = 10de;dxgi.hideAmdGpu = True;dxgi.hideNvidiaGpu = False;dxgi.customDeviceId = 2684;dxgi.customDeviceDesc = \"NVIDIA GeForce RTX 4090\""
++
+     def dump_dbg_env(self, f):
+         f.write("PATH=\"" + self.env["PATH"] + "\" \\\n")
+         f.write("\tTERM=\"xterm\" \\\n") #XXX
