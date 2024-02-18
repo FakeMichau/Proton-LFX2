@@ -49,3 +49,5 @@ You can use Nukem's mod with this build thanks to [those patches](https://github
 
 That will also effectively disable LFX2 because currently it causes a crash. But you can still use `LFX2=1` to spoof an Nvidia GPU instead of doing that manually.
 So for AMDGPUs you want both.
+Also remember about applying the registry signature override file.
+
