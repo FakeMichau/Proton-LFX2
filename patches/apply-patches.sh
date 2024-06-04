@@ -2,7 +2,7 @@
 
 git checkout -- proton
 echo "Proton: Add patches"
-patch -Np1 < ./patches/proton.patch
+patch -Np1 < ./patches/proton-lfx2-only.patch
 patch -Np1 < ./patches/makefile.patch
 
 pushd dxvk || exit

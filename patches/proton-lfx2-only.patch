@@ -1,0 +1,38 @@
+diff --git a/proton b/proton
+index 7a2b25f4..9788ac10 100755
+--- a/proton
++++ b/proton
+@@ -959,6 +959,11 @@ class CompatData:
+                             prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                     g_session.dlloverrides[f] = "n"
+ 
++                try_copy(g_proton.lib64_dir + "wine/lfx2/latencyflex2_rust.dll", "drive_c/windows/system32",
++                        prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
++                try_copy(g_proton.lib_dir + "wine/lfx2/latencyflex2_rust.dll", "drive_c/windows/syswow64",
++                        prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
++
+                 # If the user requested the NVAPI be available, copy it into place.
+                 # If they didn't, clean up any stray nvapi DLLs.
+                 if use_nvapi:
+@@ -1361,6 +1366,8 @@ class Session:
+         self.check_environment("PROTON_DISABLE_NVAPI", "disablenvapi")
+         self.check_environment("PROTON_FORCE_NVAPI", "forcenvapi")
+         self.check_environment("PROTON_HIDE_APU", "hideapu")
++        self.check_environment("LFX2", "forcelfx2")
++        self.check_environment("LFX2", "forcenvapi")
+ 
+         if "noesync" in self.compat_config:
+             self.env.pop("WINEESYNC", "")
+@@ -1505,6 +1512,12 @@ class Session:
+                 s = dll + "=" + setting
+         append_to_env_str(self.env, "WINEDLLOVERRIDES", s, ";")
+ 
++        #enable lfx2
++        if "forcelfx2" in self.compat_config:
++            self.env["DXVK_NVAPI_DRIVER_VERSION"] = "99999"
++            self.env["DXVK_NVAPI_ALLOW_OTHER_DRIVERS"] = "1"
++            self.env["DXVK_CONFIG"] = "dxgi.customVendorId = 10de;dxgi.hideAmdGpu = True;dxgi.hideNvidiaGpu = False;dxgi.customDeviceId = 2684;dxgi.customDeviceDesc = \"NVIDIA GeForce RTX 4090\""
++
+     def run_proc(self, args, local_env=None):
+         if local_env is None:
+             local_env = self.env
