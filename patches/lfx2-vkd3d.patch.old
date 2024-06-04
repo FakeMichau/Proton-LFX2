@@ -1,0 +1,616 @@
+diff --git a/include/latencyflex2.h b/include/latencyflex2.h
+new file mode 100644
+index 00000000..6bdc1f84
+--- /dev/null
++++ b/include/latencyflex2.h
+@@ -0,0 +1,129 @@
++#ifndef LATENCYFLEX2_H
++#define LATENCYFLEX2_H
++
++#define LFX2_DX12
++
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdlib.h>
++#ifdef LFX2_DX12
++#include <vkd3d_d3d12.h>
++#endif
++
++#ifdef _WIN32
++#define LFX2_API __declspec(dllimport)
++#else
++#define LFX2_API
++#endif
++
++typedef struct lfx2Dx12SubmitAux {
++    ID3D12GraphicsCommandList* executeBefore;
++    ID3D12GraphicsCommandList* executeAfter;
++    ID3D12Fence* fence;
++    uint64_t fenceValue;
++} lfx2Dx12SubmitAux;
++
++
++typedef enum lfx2MarkType {
++  lfx2MarkTypeBegin,
++  lfx2MarkTypeEnd,
++} lfx2MarkType;
++
++typedef struct lfx2Context lfx2Context;
++
++#if defined(LFX2_DX12)
++typedef struct lfx2Dx12Context lfx2Dx12Context;
++#endif
++
++/**
++ * A write handle for frame markers.
++ */
++typedef struct lfx2Frame lfx2Frame;
++
++typedef struct lfx2ImplicitContext lfx2ImplicitContext;
++
++typedef uint64_t lfx2Timestamp;
++
++typedef uint32_t lfx2SectionId;
++
++#ifdef __cplusplus
++extern "C" {
++#endif // __cplusplus
++
++#if defined(LFX2_DX12)
++LFX2_API struct lfx2Dx12Context *lfx2Dx12ContextCreate(ID3D12Device* device);
++#endif
++
++#if defined(LFX2_DX12)
++LFX2_API void lfx2Dx12ContextAddRef(struct lfx2Dx12Context *context);
++#endif
++
++#if defined(LFX2_DX12)
++LFX2_API void lfx2Dx12ContextRelease(struct lfx2Dx12Context *context);
++#endif
++
++#if defined(LFX2_DX12)
++LFX2_API
++lfx2Dx12SubmitAux lfx2Dx12ContextBeforeSubmit(struct lfx2Dx12Context *context,
++        ID3D12CommandQueue* queue);
++#endif
++
++#if defined(LFX2_DX12)
++LFX2_API void lfx2Dx12ContextBeginFrame(struct lfx2Dx12Context *context, struct lfx2Frame *frame);
++#endif
++
++#if defined(LFX2_DX12)
++LFX2_API void lfx2Dx12ContextEndFrame(struct lfx2Dx12Context *context, struct lfx2Frame *frame);
++#endif
++
++LFX2_API lfx2Timestamp lfx2TimestampNow(void);
++
++#if defined(_WIN32)
++LFX2_API lfx2Timestamp lfx2TimestampFromQpc(uint64_t qpc);
++#endif
++
++LFX2_API void lfx2SleepUntil(lfx2Timestamp target);
++
++LFX2_API struct lfx2Context *lfx2ContextCreate(void);
++
++LFX2_API void lfx2ContextAddRef(struct lfx2Context *context);
++
++LFX2_API void lfx2ContextRelease(struct lfx2Context *context);
++
++LFX2_API
++struct lfx2Frame *lfx2FrameCreate(struct lfx2Context *context,
++                                  lfx2Timestamp *out_timestamp);
++
++LFX2_API void lfx2FrameAddRef(struct lfx2Frame *frame);
++
++LFX2_API void lfx2FrameRelease(struct lfx2Frame *frame);
++
++LFX2_API
++void lfx2MarkSection(struct lfx2Frame *frame,
++                     lfx2SectionId section_id,
++                     enum lfx2MarkType mark_type,
++                     lfx2Timestamp timestamp);
++
++LFX2_API struct lfx2ImplicitContext *lfx2ImplicitContextCreate(void);
++
++LFX2_API void lfx2ImplicitContextAddRef(struct lfx2ImplicitContext *context);
++
++LFX2_API void lfx2ImplicitContextRelease(struct lfx2ImplicitContext *context);
++
++LFX2_API void lfx2ImplicitContextReset(struct lfx2ImplicitContext *context);
++
++LFX2_API
++struct lfx2Frame *lfx2FrameCreateImplicit(struct lfx2ImplicitContext *context,
++                                          lfx2Timestamp *out_timestamp);
++
++LFX2_API
++struct lfx2Frame *lfx2FrameDequeueImplicit(struct lfx2ImplicitContext *context,
++                                           bool critical);
++
++#ifdef __cplusplus
++} // extern "C"
++#endif // __cplusplus
++
++#endif /* LATENCYFLEX2_H */
+diff --git a/include/vkd3d_device_vkd3d_ext.idl b/include/vkd3d_device_vkd3d_ext.idl
+index 3e615d76..92c5d447 100644
+--- a/include/vkd3d_device_vkd3d_ext.idl
++++ b/include/vkd3d_device_vkd3d_ext.idl
+@@ -54,3 +54,16 @@ interface ID3D12DXVKInteropDevice : IUnknown
+     HRESULT LockCommandQueue(ID3D12CommandQueue *queue);
+     HRESULT UnlockCommandQueue(ID3D12CommandQueue *queue);
+ }
++
++[
++    uuid(851a9f0f-5da0-4850-b563-a7bbc414f4e6),
++    object,
++    local,
++    pointer_default(unique)
++]
++interface ID3DLfx2ExtDevice : IUnknown
++{
++    void MarkRenderStart(void *frame);
++    void MarkRenderEnd(void *frame);
++    void ImplicitBeginFrame(UINT64 *out_timestamp, void *out_frame);
++}
+\ No newline at end of file
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+index a3f7a3ad..67e67b28 100644
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -17140,6 +17140,75 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
+     d3d12_command_queue_add_submission(command_queue, &sub);
+ }
+ 
++static HRESULT STDMETHODCALLTYPE d3d12_command_queue_Signal(ID3D12CommandQueue *iface,
++        ID3D12Fence *fence_iface, UINT64 value);
++
++static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandListsLFX2(ID3D12CommandQueue *iface,
++        UINT command_list_count, ID3D12CommandList *const *command_lists)
++{
++    struct d3d12_command_queue *command_queue = impl_from_ID3D12CommandQueue(iface);
++    struct vkd3d_lfx2_vtable *lfx2 = vkd3d_lfx2_get_vtable();
++    struct vkd3d_lfx2_context *lfx2_context = &command_queue->device->lfx2_context;
++    UINT new_command_list_count = command_list_count, i = 0;
++    ID3D12CommandList **new_command_lists;
++    struct lfx2Dx12SubmitAux lfx2_aux;
++
++    if (!lfx2 || command_queue->desc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
++    {
++        d3d12_command_queue_ExecuteCommandLists(iface, command_list_count, command_lists);
++        return;
++    }
++
++    pthread_mutex_lock(&lfx2_context->current_implicit_frame_lock);
++    if (!lfx2_context->current_implicit_frame)
++    {
++        lfx2_context->current_implicit_frame = lfx2->FrameDequeueImplicit(lfx2_context->implicit_context, false);
++        if (lfx2_context->current_implicit_frame) {
++            lfx2->Dx12ContextBeginFrame(lfx2_context->dx12_context, lfx2_context->current_implicit_frame);
++        }
++    }
++    pthread_mutex_unlock(&lfx2_context->current_implicit_frame_lock);
++
++    lfx2_aux = lfx2->Dx12ContextBeforeSubmit(lfx2_context->dx12_context, iface);
++
++    if (lfx2_aux.executeBefore)
++        new_command_list_count++;
++
++    if (lfx2_aux.executeAfter)
++        new_command_list_count++;
++
++    if (!(new_command_lists = vkd3d_calloc(new_command_list_count, sizeof(*new_command_lists))))
++    {
++        ERR("Failed to allocate command list array.");
++        return;
++    }
++
++    if (lfx2_aux.executeBefore)
++        new_command_lists[i++] = (ID3D12CommandList *)lfx2_aux.executeBefore;
++
++    memcpy(&new_command_lists[i], command_lists, command_list_count * sizeof(*command_lists));
++    i += command_list_count;
++
++    if (lfx2_aux.executeAfter)
++        new_command_lists[i++] = (ID3D12CommandList *)lfx2_aux.executeAfter;
++
++    d3d12_command_queue_ExecuteCommandLists(iface, new_command_list_count, new_command_lists);
++
++    if (lfx2_aux.executeBefore)
++        d3d12_command_list_Release((d3d12_command_list_iface *)lfx2_aux.executeBefore);
++
++    if (lfx2_aux.executeAfter)
++        d3d12_command_list_Release((d3d12_command_list_iface *)lfx2_aux.executeAfter);
++
++    vkd3d_free(new_command_lists);
++
++    if (lfx2_aux.fence)
++    {
++        d3d12_command_queue_Signal(iface, lfx2_aux.fence, lfx2_aux.fenceValue);
++        d3d12_fence_Release((d3d12_fence_iface *)lfx2_aux.fence);
++    }
++}
++
+ static void STDMETHODCALLTYPE d3d12_command_queue_SetMarker(ID3D12CommandQueue *iface,
+         UINT metadata, const void *data, UINT size)
+ {
+@@ -17311,7 +17380,7 @@ static CONST_VTBL struct ID3D12CommandQueueVtbl d3d12_command_queue_vtbl =
+     /* ID3D12CommandQueue methods */
+     d3d12_command_queue_UpdateTileMappings,
+     d3d12_command_queue_CopyTileMappings,
+-    d3d12_command_queue_ExecuteCommandLists,
++    d3d12_command_queue_ExecuteCommandListsLFX2,
+     d3d12_command_queue_SetMarker,
+     d3d12_command_queue_BeginEvent,
+     d3d12_command_queue_EndEvent,
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 0b1bd876..0689029f 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -3283,6 +3283,9 @@ void d3d12_device_return_query_pool(struct d3d12_device *device, const struct vk
+ extern ULONG STDMETHODCALLTYPE d3d12_device_vkd3d_ext_AddRef(ID3D12DeviceExt *iface);
+ extern ULONG STDMETHODCALLTYPE d3d12_dxvk_interop_device_AddRef(ID3D12DXVKInteropDevice *iface);
+ 
++/* ID3DLfx2ExtDevice */
++extern ULONG STDMETHODCALLTYPE d3d12_device_lfx2_ext_AddRef(d3d12_device_lfx2_ext_iface *iface);
++
+ HRESULT STDMETHODCALLTYPE d3d12_device_QueryInterface(d3d12_device_iface *iface,
+         REFIID riid, void **object)
+ {
+@@ -3328,6 +3331,14 @@ HRESULT STDMETHODCALLTYPE d3d12_device_QueryInterface(d3d12_device_iface *iface,
+         return S_OK;
+     }
+ 
++    if (IsEqualGUID(riid, &IID_ID3DLfx2ExtDevice))
++    {
++        struct d3d12_device *device = impl_from_ID3D12Device(iface);
++        d3d12_device_lfx2_ext_AddRef(&device->ID3D12DeviceLfx2_iface);
++        *object = &device->ID3D12DeviceLfx2_iface;
++        return S_OK;
++    }
++
+     WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
+ 
+     *object = NULL;
+@@ -3374,6 +3385,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
+     vkd3d_private_store_destroy(&device->private_store);
+ 
+     vkd3d_cleanup_format_info(device);
++    vkd3d_lfx2_context_free(&device->lfx2_context);
+     vkd3d_memory_info_cleanup(&device->memory_info, device);
+     vkd3d_queue_timeline_trace_cleanup(&device->queue_timeline_trace);
+     vkd3d_shader_debug_ring_cleanup(&device->debug_ring, device);
+@@ -7007,7 +7019,7 @@ static D3D12_RESOURCE_STATES vkd3d_barrier_layout_to_resource_state(D3D12_BARRIE
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateCommittedResource3(d3d12_device_iface *iface,
+-    const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags, 
++    const D3D12_HEAP_PROPERTIES *heap_properties, D3D12_HEAP_FLAGS heap_flags,
+     const D3D12_RESOURCE_DESC1 *desc, D3D12_BARRIER_LAYOUT initial_layout,
+     const D3D12_CLEAR_VALUE *optimized_clear_value, ID3D12ProtectedResourceSession *protected_session,
+     UINT32 num_castable_formats, const DXGI_FORMAT *castable_formats, REFIID iid, void **resource)
+@@ -8369,6 +8381,7 @@ static void vkd3d_scratch_pool_init(struct d3d12_device *device)
+     device->scratch_pools[VKD3D_SCRATCH_POOL_KIND_INDIRECT_PREPROCESS].scratch_buffer_size =
+             VKD3D_SCRATCH_BUFFER_COUNT_INDIRECT_PREPROCESS;
+ }
++extern CONST_VTBL struct ID3DLfx2ExtDeviceVtbl d3d12_device_lfx2_ext_vtbl;
+ 
+ static HRESULT d3d12_device_init(struct d3d12_device *device,
+         struct vkd3d_instance *instance, const struct vkd3d_device_create_info *create_info)
+@@ -8414,6 +8427,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
+ 
+     device->ID3D12DeviceExt_iface.lpVtbl = &d3d12_device_vkd3d_ext_vtbl;
+     device->ID3D12DXVKInteropDevice_iface.lpVtbl = &d3d12_dxvk_interop_device_vtbl;
++    device->ID3D12DeviceLfx2_iface.lpVtbl = &d3d12_device_lfx2_ext_vtbl;
+ 
+     if ((rc = rwlock_init(&device->vertex_input_lock)))
+     {
+@@ -8480,6 +8494,8 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
+     }
+ #endif
+ 
++    vkd3d_lfx2_context_init(&device->lfx2_context, (d3d12_device_iface *)device);
++
+     if (vkd3d_descriptor_debug_active_qa_checks())
+     {
+         if (FAILED(hr = vkd3d_descriptor_debug_alloc_global_info(&device->descriptor_qa_global_info,
+@@ -8521,6 +8537,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
+ out_cleanup_descriptor_qa_global_info:
+     vkd3d_descriptor_debug_free_global_info(device->descriptor_qa_global_info, device);
+ out_cleanup_breadcrumb_tracer:
++    vkd3d_lfx2_context_free(&device->lfx2_context);
+ #ifdef VKD3D_ENABLE_BREADCRUMBS
+     if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_BREADCRUMBS)
+         vkd3d_breadcrumb_tracer_cleanup(&device->breadcrumb_tracer, device);
+diff --git a/libs/vkd3d/device_vkd3d_ext.c b/libs/vkd3d/device_vkd3d_ext.c
+index 5bb7eca8..e778f479 100644
+--- a/libs/vkd3d/device_vkd3d_ext.c
++++ b/libs/vkd3d/device_vkd3d_ext.c
+@@ -232,6 +232,65 @@ CONST_VTBL struct ID3D12DeviceExtVtbl d3d12_device_vkd3d_ext_vtbl =
+     d3d12_device_vkd3d_ext_CaptureUAVInfo
+ };
+ 
++static inline struct d3d12_device *d3d12_device_from_ID3D12DeviceLfx2(d3d12_device_lfx2_ext_iface *iface)
++{
++    return CONTAINING_RECORD(iface, struct d3d12_device, ID3D12DeviceLfx2_iface);
++}
++
++ULONG STDMETHODCALLTYPE d3d12_device_lfx2_ext_AddRef(d3d12_device_lfx2_ext_iface *iface)
++{
++    struct d3d12_device *device = d3d12_device_from_ID3D12DeviceLfx2(iface);
++    return d3d12_device_add_ref(device);
++}
++
++static ULONG STDMETHODCALLTYPE d3d12_device_lfx2_ext_Release(d3d12_device_lfx2_ext_iface *iface)
++{
++    struct d3d12_device *device = d3d12_device_from_ID3D12DeviceLfx2(iface);
++    return d3d12_device_release(device);
++}
++
++static HRESULT STDMETHODCALLTYPE d3d12_device_lfx2_ext_QueryInterface(d3d12_device_lfx2_ext_iface *iface, REFIID iid, void **out)
++{
++    struct d3d12_device *device = d3d12_device_from_ID3D12DeviceLfx2(iface);
++    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
++    return d3d12_device_QueryInterface(&device->ID3D12Device_iface, iid, out);
++}
++
++static void STDMETHODCALLTYPE d3d12_device_lfx2_ext_ImplicitBeginFrame(d3d12_device_lfx2_ext_iface *iface, UINT64 *out_timestamp,
++        void *out_frame)
++{
++    struct d3d12_device *device = d3d12_device_from_ID3D12DeviceLfx2(iface);
++    struct vkd3d_lfx2_vtable *lfx2 = vkd3d_lfx2_get_vtable();
++
++    *(lfx2Frame**)out_frame = lfx2->FrameCreateImplicit(device->lfx2_context.implicit_context, out_timestamp);
++}
++
++static void STDMETHODCALLTYPE d3d12_device_lfx2_ext_MarkRenderStart(d3d12_device_lfx2_ext_iface *iface, void *frame)
++{
++    struct d3d12_device *device = d3d12_device_from_ID3D12DeviceLfx2(iface);
++    struct vkd3d_lfx2_vtable *lfx2 = vkd3d_lfx2_get_vtable();
++    lfx2->Dx12ContextBeginFrame(device->lfx2_context.dx12_context, (lfx2Frame*)frame);
++}
++
++static void STDMETHODCALLTYPE d3d12_device_lfx2_ext_MarkRenderEnd(d3d12_device_lfx2_ext_iface *iface, void *frame)
++{
++    struct d3d12_device *device = d3d12_device_from_ID3D12DeviceLfx2(iface);
++    struct vkd3d_lfx2_vtable *lfx2 = vkd3d_lfx2_get_vtable();
++    lfx2->Dx12ContextEndFrame(device->lfx2_context.dx12_context, (lfx2Frame*)frame);
++}
++
++CONST_VTBL struct ID3DLfx2ExtDeviceVtbl d3d12_device_lfx2_ext_vtbl =
++{
++    /* IUnknown methods */
++    d3d12_device_lfx2_ext_QueryInterface,
++    d3d12_device_lfx2_ext_AddRef,
++    d3d12_device_lfx2_ext_Release,
++
++    /* ID3D12DeviceLfx2 methods */
++    d3d12_device_lfx2_ext_MarkRenderStart,
++    d3d12_device_lfx2_ext_MarkRenderEnd,
++    d3d12_device_lfx2_ext_ImplicitBeginFrame,
++};
+ 
+ static inline struct d3d12_device *d3d12_device_from_ID3D12DXVKInteropDevice(ID3D12DXVKInteropDevice *iface)
+ {
+diff --git a/libs/vkd3d/lfx2.c b/libs/vkd3d/lfx2.c
+new file mode 100644
+index 00000000..5fd50b91
+--- /dev/null
++++ b/libs/vkd3d/lfx2.c
+@@ -0,0 +1,70 @@
++#define VKD3D_DBG_CHANNEL VKD3D_DBG_CHANNEL_API
++
++#include "vkd3d_private.h"
++
++static pthread_once_t library_once = PTHREAD_ONCE_INIT;
++static struct vkd3d_lfx2_vtable lfx2_vtable;
++static BOOL lfx2_available;
++
++static void vkd3d_lfx2_load(void)
++{
++    HMODULE module = LoadLibraryA("latencyflex2_rust.dll");
++    if (!module)
++    {
++        lfx2_available = false;
++        return;
++    }
++
++#define LOAD_FUNCTION(name) lfx2_vtable.name = (void *)GetProcAddress(module, "lfx2" #name)
++
++    LOAD_FUNCTION(Dx12ContextCreate);
++    LOAD_FUNCTION(Dx12ContextRelease);
++    LOAD_FUNCTION(Dx12ContextBeforeSubmit);
++    LOAD_FUNCTION(Dx12ContextBeginFrame);
++    LOAD_FUNCTION(Dx12ContextEndFrame);
++    LOAD_FUNCTION(TimestampNow);
++    LOAD_FUNCTION(TimestampFromQpc);
++    LOAD_FUNCTION(ImplicitContextCreate);
++    LOAD_FUNCTION(ImplicitContextRelease);
++    LOAD_FUNCTION(ImplicitContextReset);
++    LOAD_FUNCTION(FrameCreateImplicit);
++    LOAD_FUNCTION(FrameDequeueImplicit);
++    LOAD_FUNCTION(FrameRelease);
++
++#undef LOAD_FUNCTION
++
++    lfx2_available = true;
++}
++
++struct vkd3d_lfx2_vtable *vkd3d_lfx2_get_vtable(void)
++{
++    pthread_once(&library_once, vkd3d_lfx2_load);
++    return lfx2_available ? &lfx2_vtable : NULL;
++}
++
++void vkd3d_lfx2_context_init(struct vkd3d_lfx2_context *context, d3d12_device_iface *device)
++{
++    struct vkd3d_lfx2_vtable *lfx2 = vkd3d_lfx2_get_vtable();
++    if (!lfx2)
++        return;
++
++    pthread_mutex_init(&context->current_implicit_frame_lock, NULL);
++    context->current_implicit_frame = NULL;
++    context->dx12_context = lfx2->Dx12ContextCreate((ID3D12Device *)device);
++    context->implicit_context = lfx2->ImplicitContextCreate();
++}
++
++void vkd3d_lfx2_context_free(struct vkd3d_lfx2_context *context)
++{
++    struct vkd3d_lfx2_vtable *lfx2 = vkd3d_lfx2_get_vtable();
++    if (!lfx2)
++        return;
++
++    if (context->current_implicit_frame)
++        lfx2->FrameRelease(context->current_implicit_frame);
++    if (context->implicit_context)
++        lfx2->ImplicitContextRelease(context->implicit_context);
++    if (context->dx12_context)
++        lfx2->Dx12ContextRelease(context->dx12_context);
++    pthread_mutex_destroy(&context->current_implicit_frame_lock);
++}
+\ No newline at end of file
+diff --git a/libs/vkd3d/meson.build b/libs/vkd3d/meson.build
+index 04394fd9..ad82667f 100644
+--- a/libs/vkd3d/meson.build
++++ b/libs/vkd3d/meson.build
+@@ -75,7 +75,8 @@ vkd3d_src = [
+   'raytracing_pipeline.c',
+   'acceleration_structure.c',
+   'swapchain.c',
+-  'queue_timeline.c'
++  'queue_timeline.c',
++  'lfx2.c'
+ ]
+ 
+ if enable_renderdoc
+diff --git a/libs/vkd3d/swapchain.c b/libs/vkd3d/swapchain.c
+index d0bc526d..d5366c14 100644
+--- a/libs/vkd3d/swapchain.c
++++ b/libs/vkd3d/swapchain.c
+@@ -837,6 +837,8 @@ static void dxgi_vk_swap_chain_present_callback(void *chain);
+ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain *iface, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters)
+ {
+     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
++    struct vkd3d_lfx2_vtable *lfx2 = vkd3d_lfx2_get_vtable();
++    struct vkd3d_lfx2_context *lfx2_context = &chain->queue->device->lfx2_context;
+     struct dxgi_vk_swap_chain_present_request *request;
+     struct vkd3d_queue_timeline_trace_cookie cookie;
+     TRACE("iface %p, SyncInterval %u, PresentFlags #%x, pPresentParameters %p.\n",
+@@ -848,6 +850,22 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain *if
+     if (PresentFlags & DXGI_PRESENT_TEST)
+         return S_OK;
+ 
++    pthread_mutex_lock(&lfx2_context->current_implicit_frame_lock);
++    if (!lfx2_context->current_implicit_frame)
++    {
++        lfx2_context->current_implicit_frame = lfx2->FrameDequeueImplicit(lfx2_context->implicit_context, true);
++        if (lfx2_context->current_implicit_frame) {
++            lfx2->Dx12ContextBeginFrame(lfx2_context->dx12_context, lfx2_context->current_implicit_frame);
++        }
++    }
++    if (lfx2_context->current_implicit_frame)
++    {
++        lfx2->Dx12ContextEndFrame(lfx2_context->dx12_context, lfx2_context->current_implicit_frame);
++        lfx2->FrameRelease(lfx2_context->current_implicit_frame);
++        lfx2_context->current_implicit_frame = NULL;
++    }
++    pthread_mutex_unlock(&lfx2_context->current_implicit_frame_lock);
++
+     /* If we missed the event signal last frame, we have to wait for it now.
+      * Otherwise, we end up in a floating state where our waits and thread signals might not stay in sync anymore. */
+     if (chain->outstanding_present_request)
+@@ -1454,6 +1472,7 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
+     VkPhysicalDevice vk_physical_device = chain->queue->device->vk_physical_device;
+     VkSwapchainPresentModesCreateInfoEXT present_modes_info;
+     VkDevice vk_device = chain->queue->device->vk_device;
++    struct vkd3d_lfx2_vtable *lfx2 = vkd3d_lfx2_get_vtable();
+     VkCommandPoolCreateInfo command_pool_create_info;
+     VkSwapchainCreateInfoKHR swapchain_create_info;
+     VkPresentModeKHR present_mode_group[2];
+@@ -1473,6 +1492,9 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
+     if (chain->present.is_surface_lost)
+         return;
+ 
++    if (lfx2)
++        lfx2->ImplicitContextReset(chain->queue->device->lfx2_context.implicit_context);
++
+     /* If we fail to query formats we are hosed, treat it as a SURFACE_LOST scenario. */
+     if (!dxgi_vk_swap_chain_update_formats(chain))
+     {
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index 935f3dc8..1eea15da 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -47,6 +47,8 @@
+ #include <limits.h>
+ #include <stdbool.h>
+ 
++#include "latencyflex2.h"
++
+ #define VK_CALL(f) (vk_procs->f)
+ 
+ #define MAKE_MAGIC(a,b,c,d) (((uint32_t)a) | (((uint32_t)b) << 8) | (((uint32_t)c) << 16) | (((uint32_t)d) << 24))
+@@ -4456,6 +4458,13 @@ struct vkd3d_cached_command_allocator
+     uint32_t vk_family_index;
+ };
+ 
++struct vkd3d_lfx2_context {
++    pthread_mutex_t current_implicit_frame_lock;
++    lfx2ImplicitContext *implicit_context;
++    lfx2Dx12Context *dx12_context;
++    lfx2Frame *current_implicit_frame;
++};
++
+ /* ID3D12Device */
+ typedef ID3D12Device12 d3d12_device_iface;
+ 
+@@ -4464,6 +4473,7 @@ struct vkd3d_descriptor_qa_heap_buffer_data;
+ 
+ /* ID3D12DeviceExt */
+ typedef ID3D12DeviceExt d3d12_device_vkd3d_ext_iface;
++typedef ID3DLfx2ExtDevice d3d12_device_lfx2_ext_iface;
+ 
+ /* ID3D12DXVKInteropDevice */
+ typedef ID3D12DXVKInteropDevice d3d12_dxvk_interop_device_iface;
+@@ -4591,6 +4601,7 @@ struct d3d12_device
+     d3d12_device_iface ID3D12Device_iface;
+     d3d12_device_vkd3d_ext_iface ID3D12DeviceExt_iface;
+     d3d12_dxvk_interop_device_iface ID3D12DXVKInteropDevice_iface;
++    d3d12_device_lfx2_ext_iface ID3D12DeviceLfx2_iface;
+     LONG refcount;
+ 
+     VkDevice vk_device;
+@@ -4654,6 +4665,7 @@ struct d3d12_device
+     struct hash_map vertex_input_pipelines;
+     rwlock_t fragment_output_lock;
+     struct hash_map fragment_output_pipelines;
++    struct vkd3d_lfx2_context lfx2_context;
+ #ifdef VKD3D_ENABLE_BREADCRUMBS
+     struct vkd3d_breadcrumb_tracer breadcrumb_tracer;
+ #endif
+@@ -5508,4 +5520,24 @@ HANDLE vkd3d_open_kmt_handle(HANDLE kmt_handle);
+ #define VKD3D_DRIVER_VERSION_PATCH_NV(v) (((v) >>  6) & 0xff)
+ #define VKD3D_DRIVER_VERSION_MAKE_NV(major, minor, patch) (((uint32_t)(major) << 22) | ((uint32_t)(minor) << 14) | ((uint32_t)(patch) << 6))
+ 
++struct vkd3d_lfx2_vtable {
++    struct lfx2Dx12Context *(*Dx12ContextCreate)(ID3D12Device *device);
++    void (*Dx12ContextRelease)(struct lfx2Dx12Context *context);
++    lfx2Dx12SubmitAux (*Dx12ContextBeforeSubmit)(struct lfx2Dx12Context *context, ID3D12CommandQueue *queue);
++    void (*Dx12ContextBeginFrame)(struct lfx2Dx12Context *context, struct lfx2Frame *frame);
++    void (*Dx12ContextEndFrame)(struct lfx2Dx12Context *context, struct lfx2Frame *frame);
++    lfx2Timestamp (*TimestampNow)(void);
++    lfx2Timestamp (*TimestampFromQpc)(uint64_t qpc);
++    struct lfx2ImplicitContext *(*ImplicitContextCreate)(void);
++    void (*ImplicitContextRelease)(struct lfx2ImplicitContext *context);
++    void (*ImplicitContextReset)(struct lfx2ImplicitContext *context);
++    struct lfx2Frame *(*FrameCreateImplicit)(struct lfx2ImplicitContext *context, lfx2Timestamp *out_timestamp);
++    struct lfx2Frame *(*FrameDequeueImplicit)(struct lfx2ImplicitContext *context, bool critical);
++    void (*FrameRelease)(struct lfx2Frame *frame);
++};
++
++struct vkd3d_lfx2_vtable *vkd3d_lfx2_get_vtable(void);
++void vkd3d_lfx2_context_init(struct vkd3d_lfx2_context *context, d3d12_device_iface *device);
++void vkd3d_lfx2_context_free(struct vkd3d_lfx2_context *context);
++
+ #endif  /* __VKD3D_PRIVATE_H */
