@@ -1,6 +1,8 @@
+diff --git a/Makefile.in b/Makefile.in
+index bbbef5ee..77680ded 100644
 --- a/Makefile.in
 +++ b/Makefile.in
-@@ -650,6 +650,18 @@
+@@ -671,6 +671,18 @@ $(OBJ)/.vkd3d-proton-post-build64:
  	touch $@
  
  
@@ -18,4 +20,4 @@
 +	cp -r $(SRCDIR)/upscalers/* "$(DST_DIR)"/upscalers
  
  ##
- ## mediaconv
+ ## BattlEye Bridge
