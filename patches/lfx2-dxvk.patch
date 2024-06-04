@@ -172,26 +172,6 @@ index 00000000..bda252c5
 +#endif // __cplusplus
 +
 +#endif /* LATENCYFLEX2_H */
-diff --git a/include/native/directx b/include/native/directx
---- a/include/native/directx
-+++ b/include/native/directx
-@@ -1 +1 @@
--Subproject commit 9df86f2341616ef1888ae59919feaa6d4fad693d
-+Subproject commit 9df86f2341616ef1888ae59919feaa6d4fad693d-dirty
-diff --git a/include/spirv b/include/spirv
-index 8b246ff7..ff2afc3a 160000
---- a/include/spirv
-+++ b/include/spirv
-@@ -1 +1 @@
--Subproject commit 8b246ff75c6615ba4532fe4fde20f1be090c3764
-+Subproject commit ff2afc3afc48dff4eec2a10f0212402a80708e38-dirty
-diff --git a/include/vulkan b/include/vulkan
-index 46dc0f6e..192d051d 160000
---- a/include/vulkan
-+++ b/include/vulkan
-@@ -1 +1 @@
--Subproject commit 46dc0f6e514f5730784bb2cac2a7c731636839e8
-+Subproject commit 192d051db3382e213f8bd9d8048fc9eaa78ed6ab-dirty
 diff --git a/src/d3d11/d3d11_context_ext.cpp b/src/d3d11/d3d11_context_ext.cpp
 index c89e0bc0..6512656a 100644
 --- a/src/d3d11/d3d11_context_ext.cpp
